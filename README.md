@@ -1,4 +1,3 @@
-<img width="1920" height="1920" alt="logo" src="https://github.com/user-attachments/assets/5d7b238d-5bfa-406d-b9a0-e30234ef4472" />
 # Advanced Aim Assist
 
 An advanced aim assist addon for [Meteor Client](https://meteorclient.com), built on the Fabric addon API.
