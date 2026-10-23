@@ -1,27 +1,24 @@
 {
   "schemaVersion": 1,
-  "id": "addon-template",
+  "id": "advanced-aim-assist",
   "version": "${version}",
-  "name": "Addon Template",
-  "description": "An addon template for Meteor Client addons.",
+  "name": "Advanced Aim Assist",
+  "description": "An advanced aim assist addon for Meteor Client with multiple targeting, rotation and anti-detection modes.",
   "authors": [
-    "seasnail"
+    "FaydevOps"
   ],
   "contact": {
-    "sources": "https://github.com/MeteorDevelopment/meteor-addon-template"
+    "sources": "https://github.com/FaydevOps/meteor-addon-aimassit"
   },
-  "icon": "assets/template/icon.png",
+  "icon": "assets/advanced-aim-assist/icon.png",
   "environment": "client",
   "entrypoints": {
     "meteor": [
-      "com.example.addon.AddonTemplate"
+      "com.advancedaimassist.AdvancedAimAssistAddon"
     ]
   },
-  "mixins": [
-    "addon-template.mixins.json"
-  ],
   "custom": {
-    "meteor-client:color": "225,25,25",
+    "meteor-client:color": "0,180,255",
     "modmenu": {
       "parent": {
         "id": "meteor-client"
@@ -29,8 +26,8 @@
     }
   },
   "depends": {
-    "java": ">=${jdk_version}",
-    "minecraft": "${minecraft_version}",
+    "java": ">=21",
+    "minecraft": ["${mc_version}"],
     "meteor-client": "*"
   }
 }

@@ -1,138 +1,159 @@
-# Meteor Addon Template
+# Advanced Aim Assist
 
-A template to allow easy usage of the Meteor Addon API.
+An advanced aim assist addon for [Meteor Client](https://meteorclient.com), built on the Fabric addon API.
 
-### How to use
+The addon replaces the old Meteor `AimAssist` with a configurable targeting system, several rotation modes and optional anti-detection behaviour.
 
-#### Use GitHub Template (Recommended)
+## Features
 
-- Click the green `Use this template` button in the top right corner of this page.  
-  This will create a new repository with this template and a clean history.
+- Targets players and hostile mobs (`Monster` entities).
+- Range and FOV filtering, plus a direct line-of-sight raycast.
+- Target priorities: lowest health, closest distance or smallest angle to the crosshair.
+- Sticky targeting with a separate unlock range.
+- Three rotation modes: `Instant`, `Smooth` and `Linear`.
+- Optional velocity prediction, with a configurable number of ticks.
+- Aims at the target's head, body or feet using its bounding box.
+- Optional attack-cooldown gate.
+- Anti-detection options: random rotation offsets, random pauses and a human-like rotation-speed cap.
+- Optional visible camera movement. Disable `move-camera` for silent rotations.
 
-#### Clone Manually
+## Requirements
 
-- Alternatively, clone this repository using these commands for a clean history:
-  ```bash
-  git clone --depth 1 https://github.com/MeteorDevelopment/meteor-addon-template your-addon-name
-  cd your-addon-name
-  rm -rf .git
-  git init
-  git add .
-  git commit -m "Initial commit from template"
-  ```
+| Component | Version |
+| --- | --- |
+| Minecraft | 1.21.11 |
+| Yarn mappings | 1.21.11+build.3 |
+| Fabric Loader | 0.18.2 |
+| Meteor Client | 1.21.11-SNAPSHOT |
+| Gradle | 9.2.0 |
+| JDK | 21 |
 
-#### Development
+The dependency versions are defined in [`gradle/libs.versions.toml`](gradle/libs.versions.toml). This project targets Minecraft 1.21.11 using Yarn mappings. To build for another version, update `minecraft`, `yarn-mappings`, `fabric-loader`, `meteor` and, when necessary, `loom` and the Java version in that file. The code uses Yarn names (`getVelocity()`, `mc.world.getEntities()`, `Vec3d`, etc.).
 
-- Use this template to add custom modules, commands, HUDs, and other features to Meteor Client.
-- To test, run the `Minecraft Client` configuration in your IDE.
-  This will start a Minecraft client with the Meteor Client mod and your addon loaded.
-- To build, run the gradle `build` task. This will create a JAR file in the `build/libs` folder.
-    - Move the JAR file to the `mods` folder of your Minecraft installation, alongside the Meteor Client mod and run the
-      game.
+> Gradle itself must run on JDK 21 or newer. Having only a Java 17 `JAVA_HOME` will fail during Loom configuration.
 
-### Updating to newer Minecraft versions
+## Building
 
-To update this template to a newer Minecraft version, follow these steps:
+Windows:
 
-1. Ensure a Meteor Client snapshot is available for the new Minecraft version.
-2. Update `gradle/libs.versions.toml` (the versions catalog):
-    - Set the version entries to the new versions. Common keys to update are:
-        - `versions.minecraft` - Minecraft version
-        - `versions.fabric-loader` - Fabric loader version
-        - `versions.meteor` - Meteor Client snapshot version
-    - If your addon depends on other libraries listed under the `[libraries]` section, update their versions there as
-      needed.
-    - After editing, refresh Gradle dependencies and rebuild your project in the IDE.
-3. Update Loom:
-    - Change the `loom` version in `gradle/libs.versions.toml` (the `versions.loom` entry) to the latest version
-      compatible with the new Minecraft version.
-4. Update the Gradle wrapper:
-    - Run the wrapper update command for your platform. Examples:
-      - Unix / macOS / Windows (Powershell): `./gradlew wrapper --gradle-version <version> && ./gradlew wrapper`
-      - Windows (cmd.exe): `gradlew.bat wrapper --gradle-version <version> && gradlew.bat wrapper`
-    - This updates and regenerates the Gradle Wrapper scripts (`gradlew`, `gradlew.bat`, etc.) for the specified version.
-5. Update your source code:
-    - Adjust for Minecraft source changes: method names, imports, mixins, etc.
-    - Check for Meteor Client API changes that may affect your addon by comparing against the
-      [master branch](https://github.com/MeteorDevelopment/meteor-client/tree/master).
-6. Build and test:
-    - Run the gradle `build` task.
-    - Confirm the build succeeds and your addon works with the new Minecraft version.
-
-### Project structure
-
-```text
-.
-│── .github
-│   ╰── workflows
-│       │── dev_build.yml
-│       ╰── pull_request.yml
-│── gradle
-│   │── libs.versions.toml
-│   ╰── wrapper
-│       │── gradle-wrapper.jar
-│       ╰── gradle-wrapper.properties
-│── src
-│   ╰── main
-│       │── java
-│       │   ╰── com
-│       │       ╰── example
-│       │           ╰── addon
-│       │               │── commands
-│       │               │   ╰── CommandExample
-│       │               │── hud
-│       │               │   ╰── HudExample
-│       │               │── modules
-│       │               │   ╰── ModuleExample
-│       │               ╰── AddonTemplate
-│       ╰── resources
-│           │── assets
-│           │   ╰── template
-│           │       ╰── icon.png
-│           │── addon-template.mixins.json
-│           ╰── fabric.mod.json
-│── .editorconfig
-│── .gitignore
-│── build.gradle.kts
-│── gradle.properties
-│── gradlew
-│── gradlew.bat
-│── LICENSE
-│── README.md
-╰── settings.gradle.kts
+```powershell
+$env:JAVA_HOME = "C:\path\to\jdk-21"
+.\gradlew.bat build
 ```
 
-This is the default project structure. Each folder/file has a specific purpose.  
-Here is a brief explanation of the ones you might need to modify:
+Linux/macOS:
 
-- `.github/workflows`: Contains the GitHub Actions configuration files.
-- `gradle`: Contains the Gradle wrapper files and the versions catalog.  
-  - `libs.versions.toml`: Defines version numbers for Minecraft, Loom, Meteor, and other dependencies.
-  - `wrapper`: Contains the Gradle wrapper executable files.  
-    To update the Gradle wrapper executable itself, run the wrapper update command (examples are shown above).
-- `src/main/java/com/example/addon`: Contains the main class of the addon.  
-  Here you can register your custom commands, modules, and HUDs.  
-  Edit the `getPackage` method to reflect the package of your addon.
-- `src/main/resources`: Contains the resources of the addon.
-    - `assets`: Contains the assets of the addon.  
-      You can add your own assets here, separated in subfolders.
-        - `template`: Contains the assets of the template.  
-          You can replace the `icon.png` file with your own addon icon.  
-          Also, rename this folder to reflect the name of your addon.
-    - `addon-template.mixins.json`: Contains the Mixin configuration for the addon.  
-      You can add your own mixins in the `client` array.
-    - `fabric.mod.json`: Contains the metadata of the addon.  
-      Edit the various fields to reflect the metadata of your addon.
-- `build.gradle.kts`: Contains the Gradle build script.  
-  You can manage the dependencies of the addon here.  
-  Remember to keep the `fabric-loom` version up-to-date.
-- `gradle.properties`: Contains additional build properties used by the build script
-  (for example `maven_group` and `archives_base_name`).  
-  Dependency and platform version numbers are stored in `gradle/libs.versions.toml`.
-- `LICENSE`: Contains the license of the addon.  
-  You can edit this file to change the license of your addon.
-- `README.md`: Contains the documentation of the addon.  
-  You can edit this file to reflect the documentation of your addon, and showcase its features.
+```bash
+export JAVA_HOME=/path/to/jdk-21
+./gradlew build
+```
+
+Alternatively, pass the JDK directly to Gradle:
+
+```powershell
+.\gradlew.bat build -Dorg.gradle.java.home="C:\path\to\jdk-21"
+```
+
+The output jar is written to:
+
+```text
+build/libs/advanced-aim-assist-1.0.0.jar
+```
+
+## Installing and testing
+
+1. Install Minecraft 1.21.11 with Fabric Loader 0.18.2 or newer.
+2. Put the Meteor Client jar and `advanced-aim-assist-1.0.0.jar` in your `.minecraft/mods` folder.
+3. Launch the Fabric profile.
+4. Open the Meteor GUI and enable **Advanced Aim Assist** under **Combat**, or run:
+
+```text
+.t advanced-aim-assist
+```
+
+To test from the IDE, run the `Minecraft Client` configuration (or `./gradlew runClient`). This launches a development client with Meteor and the addon loaded.
+
+### Cloning this repository
+
+```bash
+git clone https://github.com/FaydevOps/meteor-addon-aimassit
+cd meteor-addon-aimassit
+```
+
+## Settings
+
+### General
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `range` | `4.5` | Maximum target distance in blocks (2.0 - 6.0). |
+| `fov` | `90` | FOV filter in degrees (30 - 180). `180` disables the filter. |
+| `priority` | `LowestHealth` | `LowestHealth`, `Closest` or `Angle`. |
+| `ignore-friends` | `true` | Skips players on the Meteor friends list. |
+| `ignore-invisible` | `true` | Skips invisible entities. |
+
+### Aim
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `aim-speed` | `5.0` | Maximum rotation speed in degrees per tick (1.0 - 20.0). |
+| `smoothness` | `0.3` | Interpolation strength for `Smooth` mode (0.0 - 1.0). |
+| `prediction` | `true` | Predicts the target's movement. |
+| `prediction-ticks` | `3` | Ticks to look ahead (1 - 10). |
+| `aim-at` | `Head` | `Head`, `Body` or `Feet`. |
+| `rotation-mode` | `Smooth` | `Instant`, `Smooth` or `Linear`. |
+| `move-camera` | `true` | Moves the camera with the aim; disable for silent rotations. |
+
+### Targeting
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `sticky` | `true` | Keeps the current target until it leaves the unlock range. |
+| `unlock-range` | `5.5` | Distance at which a sticky target is released. It is clamped to at least `range + 0.5`. |
+
+### Checks
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `require-line-of-sight` | `true` | Only targets entities visible through a block raycast. |
+| `require-attack-cooldown` | `false` | Only rotates while the attack cooldown is fully charged. |
+
+### Anti-Detection
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `randomize` | `false` | Adds a random offset to the final yaw and pitch. |
+| `random-amount` | `0.1` | Maximum random offset in degrees (0.0 - 1.0). |
+| `human-like` | `false` | Skips roughly 1 in 10 ticks and caps rotation speed. |
+
+## How it works
+
+| File | Purpose |
+| --- | --- |
+| `AdvancedAimAssistAddon.java` | Meteor entrypoint. Registers the module in `onInitialize()`. |
+| `modules/AdvancedAimAssist.java` | Module settings, target selection, sticky logic and rotation handling. |
+| `utils/AimUtils.java` | Aim-point calculation, yaw/pitch math, FOV angle and line-of-sight raycast. |
+| `utils/AimTarget.java` | Per-tick target snapshot used for sorting. |
+| `utils/AimPart.java` | `Head` / `Body` / `Feet`. |
+| `utils/RotationMode.java` | `Instant` / `Smooth` / `Linear`. |
+| `utils/TargetPriority.java` | `LowestHealth` / `Closest` / `Angle`. |
+
+The module listens to `TickEvent.Post`. Each tick it:
+
+1. Reuses a valid sticky target, or scans `mc.world.getEntities()`.
+2. Filters by entity type, distance, FOV, friends, invisibility and line of sight.
+3. Sorts the remaining candidates using the selected priority.
+4. Rebuilds the aim point from the target's bounding box and applies velocity prediction.
+5. Smooths or steps the rotation according to the selected mode and speed.
+6. Applies the result through `Rotations.rotate(...)` and `Rotations.setCamRotation(...)`.
+
+`getVelocity()` returns the entity's movement per tick. Meteor no longer exposes `Utils.loadedEntities()`, so the module uses `mc.world.getEntities()`, the same source as Meteor's `TargetUtils`.
+
+## Notes
+
+- The anti-detection options make the movement less mechanical; they do not bypass server-side anticheat checks.
+- Prediction can place the aim point behind cover. With `require-line-of-sight` enabled, that target may be dropped until it is visible again.
+- Use this addon only on servers where such modifications are allowed.
 
 ## License
 
