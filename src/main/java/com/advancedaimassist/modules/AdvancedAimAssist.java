@@ -22,968 +22,839 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.Item;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
-/**
- * AdvancedAimAssist (AimBot) - DemonClient v2.2 Crash-Safe & Memory-Hardened Edition
- * Hardened Features:
- * 1. Zero Native Crash 0xc0000409 (GL vertex capacity buffer overrun prevention in renderTargetCircle)
- * 2. Rate-limited clean rotation updates (avoids saturating the Render Thread and matrix buffers)
- * 3. Robust Try-Catch exception isolation in onTick with auto-toggle failsafe
- * 4. Pointer & state clearance on world/server change via GameLeftEvent, GameJoinedEvent, and world validation
- * 5. Strict Additive Pull Assist, Freedom Hitbox Roaming, and Strict Player-Only filtering
- * 6. GCD Sensitivity Grid alignment and NaN/Infinity protocol protection
- */
+
+
 public class AdvancedAimAssist extends Module {
-    private final SettingGroup sgGeneral = settings.createGroup("General");
-    private final SettingGroup sgPro = settings.createGroup("Pro Settings");
-    private final SettingGroup sgHuman = settings.createGroup("Humanization");
+
+    // ------------------------------------------------------------------ groups
+    private final SettingGroup sgGeneral   = settings.createGroup("General");
+    private final SettingGroup sgPro       = settings.createGroup("Pro Settings");
+    private final SettingGroup sgHuman     = settings.createGroup("Humanization");
     private final SettingGroup sgTargeting = settings.createGroup("Targeting");
-    private final SettingGroup sgMulti = settings.createGroup("Multi-Target");
-    private final SettingGroup sgChecks = settings.createGroup("Checks");
-    private final SettingGroup sgRender = settings.createGroup("Render");
+    private final SettingGroup sgMulti     = settings.createGroup("Multi-Target");
+    private final SettingGroup sgChecks    = settings.createGroup("Checks");
+    private final SettingGroup sgRender    = settings.createGroup("Render");
 
-    public enum AimMode {
-        Client,  // Additive pull assist (collaborates with user mouse input)
-        Assist,  // Smooth humanized assist
-        Silent   // Server packets only, free camera
-    }
+    // ------------------------------------------------------------------ enums
+    public enum AimMode        { Client, Assist, Silent }
+    public enum MultiTargetMode { Closest, LowestHealth, Crosshair, Cycle }
 
-    public enum MultiTargetMode {
-        Closest,
-        LowestHealth,
-        Crosshair,
-        Cycle
-    }
-
-    // General Settings (Protocol-Safe AntiCheat-Safe Defaults)
+    // ------------------------------------------------------------------ General
     private final Setting<AimMode> aimMode = sgGeneral.add(new EnumSetting.Builder<AimMode>()
         .name("aim-mode")
-        .description("Client: additive pull assist. Assist: smooth humanized. Silent: server rotations only.")
+        .description("Client/Assist: visual rotation assist. Silent: server-side only.")
         .defaultValue(AimMode.Client)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> onlyWhenClicking = sgGeneral.add(new BoolSetting.Builder()
         .name("only-when-clicking")
-        .description("Aim assist only activates when holding left-click (Legit Ghost style).")
+        .description("Activate only while holding left-click.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> weaponOnly = sgGeneral.add(new BoolSetting.Builder()
         .name("weapon-only")
-        .description("Only activates when holding a weapon (sword, axe, mace, trident).")
+        .description("Activate only while holding a melee weapon.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Double> range = sgGeneral.add(new DoubleSetting.Builder()
         .name("range")
-        .description("Maximum distance in blocks.")
-        .defaultValue(4.5)
-        .range(2.0, 6.0)
-        .sliderRange(2.0, 6.0)
-        .build()
-    );
+        .description("Maximum target distance in blocks.")
+        .defaultValue(4.5).range(2.0, 6.0).sliderRange(2.0, 6.0)
+        .build());
 
     private final Setting<Double> horizontalSpeed = sgGeneral.add(new DoubleSetting.Builder()
         .name("horizontal-speed")
-        .description("Horizontal rotation speed (deg/sec).")
-        .defaultValue(150.0)
-        .range(10.0, 360.0)
-        .sliderRange(10.0, 360.0)
-        .build()
-    );
+        .description("Peak horizontal angular speed (deg/sec).")
+        .defaultValue(270.0).range(20.0, 720.0).sliderRange(40.0, 500.0)
+        .build());
 
     private final Setting<Double> verticalSpeed = sgGeneral.add(new DoubleSetting.Builder()
         .name("vertical-speed")
-        .description("Vertical rotation speed (deg/sec).")
-        .defaultValue(95.0)
-        .range(10.0, 360.0)
-        .sliderRange(10.0, 360.0)
-        .build()
-    );
-
-    private final Setting<Double> maxAbsoluteSpeed = sgGeneral.add(new DoubleSetting.Builder()
-        .name("max-absolute-speed")
-        .description("Hard ceiling for angular speed per tick.")
-        .defaultValue(18.0)
-        .range(5.0, 40.0)
-        .sliderRange(5.0, 35.0)
-        .build()
-    );
+        .description("Peak vertical angular speed (deg/sec).")
+        .defaultValue(190.0).range(20.0, 500.0).sliderRange(40.0, 400.0)
+        .build());
 
     private final Setting<Double> fov = sgGeneral.add(new DoubleSetting.Builder()
         .name("fov")
-        .description("Field of view restriction.")
-        .defaultValue(180.0)
-        .range(10.0, 360.0)
-        .sliderRange(10.0, 360.0)
-        .build()
-    );
-
-    private final Setting<Boolean> keepRotation = sgGeneral.add(new BoolSetting.Builder()
-        .name("keep-rotation")
-        .description("Eliminates visual camera micro-jitter.")
-        .defaultValue(true)
-        .build()
-    );
+        .description("Activation field of view (degrees, 360 = omnidirectional).")
+        .defaultValue(140.0).range(10.0, 360.0).sliderRange(10.0, 180.0)
+        .build());
 
     private final Setting<Boolean> gcdFix = sgGeneral.add(new BoolSetting.Builder()
         .name("gcd-fix")
-        .description("Applies mouse sensitivity GCD rounding to bypass Grim and Vulcan.")
+        .description("Quantises rotation steps to the GCD grid for Grim/Vulcan bypass.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> prediction = sgGeneral.add(new BoolSetting.Builder()
         .name("prediction")
-        .description("Kinematic target position estimation.")
+        .description("Kinematic intercept: aims where the target will be.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> predictionTicks = sgGeneral.add(new IntSetting.Builder()
         .name("prediction-ticks")
-        .description("Ticks ahead to predict.")
-        .defaultValue(2)
-        .range(1, 10)
-        .sliderRange(1, 10)
+        .description("Tick lookahead for intercept calculation.")
+        .defaultValue(2).range(1, 6).sliderRange(1, 5)
         .visible(prediction::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> autoAttack = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-attack")
-        .description("Automatically attacks when locked on target.")
+        .description("Auto-attack when the crosshair is within 5° of the target.")
         .defaultValue(false)
-        .build()
-    );
+        .build());
 
-    // Pro Settings (Sticky-Glue & Adherence)
+    // ------------------------------------------------------------------ Pro
     private final Setting<Double> stickyGlue = sgPro.add(new DoubleSetting.Builder()
         .name("sticky-glue-strength")
-        .description("DemonClient sticky adherence factor.")
-        .defaultValue(0.60)
-        .range(0.1, 1.0)
-        .sliderRange(0.1, 1.0)
-        .build()
-    );
-
-    private final Setting<Boolean> strafeCompensation = sgPro.add(new BoolSetting.Builder()
-        .name("strafe-compensation")
-        .description("Instantly compensates for enemy strafing direction changes.")
-        .defaultValue(true)
-        .build()
-    );
+        .description("Adhesion force. Higher = tighter tracking without lag.")
+        .defaultValue(0.82).range(0.1, 1.0).sliderRange(0.1, 1.0)
+        .build());
 
     private final Setting<Double> microMagnetism = sgPro.add(new DoubleSetting.Builder()
         .name("micro-magnetism")
-        .description("Subtle magnetic pull toward hitbox center.")
-        .defaultValue(0.3)
-        .range(0.0, 3.0)
-        .sliderRange(0.0, 3.0)
-        .build()
-    );
+        .description("Extra centering pull applied when crosshair is inside the hitbox (<6°).")
+        .defaultValue(0.35).range(0.0, 3.0).sliderRange(0.0, 2.0)
+        .build());
 
-    // Humanization Settings (Deep Damping, Ultra-Subtle Noise & Manual Override)
+    // ------------------------------------------------------------------ Humanization
     private final Setting<Double> smoothness = sgHuman.add(new DoubleSetting.Builder()
         .name("smoothness")
-        .description("Deep smoothing and gradual ease-out factor.")
-        .defaultValue(0.72)
-        .range(0.01, 0.99)
-        .sliderRange(0.01, 0.99)
-        .build()
-    );
+        .description("Sigmoid blend factor. Low = crisp snap. High = soft cinematic glide.")
+        .defaultValue(0.20).range(0.01, 0.99).sliderRange(0.01, 0.99)
+        .build());
 
     private final Setting<Double> humanVariation = sgHuman.add(new DoubleSetting.Builder()
         .name("human-variation")
-        .description("Ultra-subtle microscopic noise intensity (zero artificial jitter).")
-        .defaultValue(0.02)
-        .range(0.0, 1.0)
-        .sliderRange(0.0, 1.0)
-        .build()
-    );
+        .description("Micro-noise amplitude for behavioural heuristic evasion.")
+        .defaultValue(0.018).range(0.0, 1.0).sliderRange(0.0, 0.5)
+        .build());
 
     private final Setting<Double> hitboxRoaming = sgHuman.add(new DoubleSetting.Builder()
         .name("hitbox-roaming-intensity")
-        .description("Freedom Hitbox wandering intensity (allows free cursor movement inside enemy bounding box).")
-        .defaultValue(0.15)
-        .range(0.0, 1.0)
-        .sliderRange(0.0, 1.0)
-        .build()
-    );
+        .description("Allows the aim to drift naturally within the enemy bounding box.")
+        .defaultValue(0.16).range(0.0, 1.0).sliderRange(0.0, 1.0)
+        .build());
 
-    private final Setting<Double> mouseThreshold = sgHuman.add(new DoubleSetting.Builder()
-        .name("mouse-threshold")
-        .description("Manual mouse override threshold.")
-        .defaultValue(1.2)
-        .range(0.0, 5.0)
-        .sliderRange(0.0, 5.0)
-        .build()
-    );
+    private final Setting<Double> escapeAngle = sgHuman.add(new DoubleSetting.Builder()
+        .name("escape-angle")
+        .description("Minimum angle (°) away from target required to release camera assist.")
+        .defaultValue(80.0).range(20.0, 180.0).sliderRange(40.0, 120.0)
+        .build());
 
     private final Setting<Boolean> realisticTiming = sgHuman.add(new BoolSetting.Builder()
         .name("realistic-timing")
-        .description("Human reaction time latency.")
+        .description("Simulates human reaction latency on new target acquisition.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> reactionTimeMin = sgHuman.add(new IntSetting.Builder()
-        .name("reaction-time-min")
-        .description("Min reaction ms.")
-        .defaultValue(30)
-        .range(0, 500)
-        .sliderRange(0, 300)
+        .name("reaction-time-min").description("Min reaction latency (ms).")
+        .defaultValue(15).range(0, 500).sliderRange(0, 300)
         .visible(realisticTiming::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> reactionTimeMax = sgHuman.add(new IntSetting.Builder()
-        .name("reaction-time-max")
-        .description("Max reaction ms.")
-        .defaultValue(90)
-        .range(0, 500)
-        .sliderRange(0, 300)
+        .name("reaction-time-max").description("Max reaction latency (ms).")
+        .defaultValue(50).range(0, 500).sliderRange(0, 300)
         .visible(realisticTiming::get)
-        .build()
-    );
+        .build());
 
-    // Targeting Settings
+    // ------------------------------------------------------------------ Targeting
     private final Setting<AimPart> hitboxTarget = sgTargeting.add(new EnumSetting.Builder<AimPart>()
-        .name("hitbox-target")
-        .description("Hitbox target zone.")
+        .name("hitbox-target").description("Target zone within the enemy hitbox.")
         .defaultValue(AimPart.Head)
-        .build()
-    );
+        .build());
 
     private final Setting<Set<EntityType<?>>> entities = sgTargeting.add(new EntityTypeListSetting.Builder()
-        .name("entities")
-        .description("Allowed entities.")
+        .name("entities").description("Entity types to target.")
         .onlyAttackable()
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> targetNpcs = sgTargeting.add(new BoolSetting.Builder()
-        .name("target-npcs")
-        .description("Target villagers/traders.")
+        .name("target-npcs").description("Also target villagers and wandering traders.")
         .defaultValue(false)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> ignoreFriends = sgTargeting.add(new BoolSetting.Builder()
-        .name("ignore-friends")
-        .description("Ignore friends.")
+        .name("ignore-friends").description("Skip players on the friends list.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> ignoreInvisible = sgTargeting.add(new BoolSetting.Builder()
-        .name("ignore-invisible")
-        .description("Ignore invisible.")
+        .name("ignore-invisible").description("Skip invisible entities.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<TargetPriority> priority = sgTargeting.add(new EnumSetting.Builder<TargetPriority>()
-        .name("priority")
-        .description("Target sorting priority.")
+        .name("priority").description("How to rank multiple valid targets.")
         .defaultValue(TargetPriority.Closest)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> sticky = sgTargeting.add(new BoolSetting.Builder()
-        .name("sticky-target")
-        .description("Sticky lock hysteresis.")
+        .name("sticky-target").description("Hold the current target until it exits the unlock range.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<Double> unlockRange = sgTargeting.add(new DoubleSetting.Builder()
-        .name("unlock-range")
-        .description("Unlock distance.")
-        .defaultValue(5.5)
-        .range(2.0, 12.0)
-        .sliderRange(2.0, 12.0)
+        .name("unlock-range").description("Distance at which a sticky target is released.")
+        .defaultValue(5.5).range(2.0, 12.0).sliderRange(2.0, 10.0)
         .visible(sticky::get)
-        .build()
-    );
+        .build());
 
-    private final Setting<Double> releaseAngle = sgTargeting.add(new DoubleSetting.Builder()
-        .name("release-angle")
-        .description("Release angle when looking away.")
-        .defaultValue(85.0)
-        .range(10.0, 180.0)
-        .sliderRange(10.0, 180.0)
-        .build()
-    );
-
-    // Multi-Target Advanced Settings
+    // ------------------------------------------------------------------ Multi-Target
     private final Setting<Boolean> multiTarget = sgMulti.add(new BoolSetting.Builder()
-        .name("multi-target")
-        .description("Enables advanced handling when multiple opponents are in range.")
+        .name("multi-target").description("Enable multi-target prioritisation logic.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<MultiTargetMode> multiTargetMode = sgMulti.add(new EnumSetting.Builder<MultiTargetMode>()
-        .name("multi-target-mode")
-        .description("Strategy for switching between multiple opponents.")
+        .name("multi-target-mode").description("Strategy when multiple targets are in range.")
         .defaultValue(MultiTargetMode.Closest)
         .visible(multiTarget::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> switchCooldown = sgMulti.add(new IntSetting.Builder()
-        .name("switch-cooldown")
-        .description("Ticks to wait before switching target.")
-        .defaultValue(8)
-        .range(0, 40)
-        .sliderRange(0, 30)
+        .name("switch-cooldown").description("Ticks before a target switch is allowed.")
+        .defaultValue(4).range(0, 40).sliderRange(0, 30)
         .visible(multiTarget::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> cycleTime = sgMulti.add(new IntSetting.Builder()
-        .name("cycle-time")
-        .description("Ticks between automatic target cycling.")
-        .defaultValue(40)
-        .range(10, 200)
-        .sliderRange(10, 100)
+        .name("cycle-time").description("Ticks between automatic target cycling.")
+        .defaultValue(40).range(10, 200).sliderRange(10, 100)
         .visible(() -> multiTarget.get() && multiTargetMode.get() == MultiTargetMode.Cycle)
-        .build()
-    );
+        .build());
 
-    // Checks Settings
+    // ------------------------------------------------------------------ Checks
     private final Setting<Boolean> throughWalls = sgChecks.add(new BoolSetting.Builder()
-        .name("through-walls")
-        .description("Allows aiming through walls.")
+        .name("through-walls").description("Target entities through solid blocks.")
         .defaultValue(false)
-        .build()
-    );
+        .build());
 
     private final Setting<Boolean> requireAttackCooldown = sgChecks.add(new BoolSetting.Builder()
-        .name("require-attack-cooldown")
-        .description("Attack cooldown check.")
+        .name("require-attack-cooldown").description("Only assist when the attack cooldown is full.")
         .defaultValue(false)
-        .build()
-    );
+        .build());
 
-    // Render Settings
+    // ------------------------------------------------------------------ Render
     private final Setting<Boolean> renderCircle = sgRender.add(new BoolSetting.Builder()
-        .name("target-circle")
-        .description("Target feet ring.")
+        .name("target-circle").description("Draw a ring around the locked target's feet.")
         .defaultValue(true)
-        .build()
-    );
+        .build());
 
     private final Setting<ShapeMode> circleShapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("circle-shape-mode")
-        .description("Ring shape mode.")
+        .name("circle-shape-mode").description("Fill / outline / both.")
         .defaultValue(ShapeMode.Both)
         .visible(renderCircle::get)
-        .build()
-    );
+        .build());
 
     private final Setting<SettingColor> circleFillColor = sgRender.add(new ColorSetting.Builder()
-        .name("circle-fill-color")
-        .description("Fill color.")
+        .name("circle-fill-color").description("Ring fill color.")
         .defaultValue(new SettingColor(255, 50, 50, 40))
         .visible(() -> renderCircle.get() && circleShapeMode.get().sides())
-        .build()
-    );
+        .build());
 
     private final Setting<SettingColor> circleOutlineColor = sgRender.add(new ColorSetting.Builder()
-        .name("circle-outline-color")
-        .description("Outline color.")
+        .name("circle-outline-color").description("Ring outline color.")
         .defaultValue(new SettingColor(255, 60, 60, 220))
         .visible(() -> renderCircle.get() && circleShapeMode.get().lines())
-        .build()
-    );
+        .build());
 
     private final Setting<Double> circleRadius = sgRender.add(new DoubleSetting.Builder()
-        .name("circle-radius")
-        .description("Radius.")
-        .defaultValue(0.55)
-        .range(0.2, 2.0)
-        .sliderRange(0.2, 2.0)
+        .name("circle-radius").description("Ring radius in blocks.")
+        .defaultValue(0.55).range(0.2, 2.0).sliderRange(0.2, 2.0)
         .visible(renderCircle::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Integer> circleSegments = sgRender.add(new IntSetting.Builder()
-        .name("circle-segments")
-        .description("Segments.")
-        .defaultValue(32)
-        .range(8, 64)
-        .sliderRange(8, 48)
+        .name("circle-segments").description("Polygon resolution of the ring.")
+        .defaultValue(32).range(8, 64).sliderRange(8, 48)
         .visible(renderCircle::get)
-        .build()
-    );
+        .build());
 
     private final Setting<Double> circleHeight = sgRender.add(new DoubleSetting.Builder()
-        .name("circle-height")
-        .description("Height.")
-        .defaultValue(0.02)
-        .range(0.0, 0.5)
-        .sliderRange(0.0, 0.2)
+        .name("circle-height").description("Vertical offset above the target's feet.")
+        .defaultValue(0.02).range(0.0, 0.5).sliderRange(0.0, 0.2)
         .visible(renderCircle::get)
-        .build()
-    );
+        .build());
 
-    // State Variables & Caches
-    private Entity target;
-    private long reactionReadyAt;
-    private int switchCooldownTicks;
-    private int cycleTimer;
-    private float previousStepYaw = 0f;
-    private float previousStepPitch = 0f;
-    private int targetSwitchProgressTicks = 0;
-    private float lastPlayerYaw = 0f;
-    private float lastPlayerPitch = 0f;
-    private long lastTickTime = 0L;
-    private World lastWorld = null;
+    // ------------------------------------------------------------------ State
+    private Entity  target;
+    private long    reactionReadyAt;
+    private int     switchCooldownTicks;
+    private int     cycleTimer;
+
+    /** Rotation applied by the assist last tick (used to isolate manual mouse delta). */
+    private float   prevAssistYaw   = 0f;
+    private float   prevAssistPitch = 0f;
+
+    /** Player angles at end of last tick (after assist was applied). */
+    private float   lastPlayerYaw   = 0f;
+    private float   lastPlayerPitch = 0f;
+
+    private long    lastTickMs      = 0L;
+    private World   lastWorld       = null;
+
     private final List<Entity> candidateCache = new ArrayList<>();
 
+    // ------------------------------------------------------------------ ctor
     public AdvancedAimAssist() {
-        super(Categories.Combat, "advanced-aim-assist", "DemonClient v2.2 Crash-Safe & Memory-Hardened Edition.");
+        super(Categories.Combat, "advanced-aim-assist",
+              "DemonClient v2.2 — Sigmoidal sticky-glue tracking with kinematic intercept.");
     }
 
-    /**
-     * Resets all internal targeting and momentum state cleanly.
-     */
+    // ------------------------------------------------------------------ lifecycle
     private void resetState() {
-        target = null;
-        reactionReadyAt = 0;
+        target             = null;
+        reactionReadyAt    = 0L;
         switchCooldownTicks = 0;
-        cycleTimer = 0;
-        targetSwitchProgressTicks = 6;
-        previousStepYaw = 0f;
-        previousStepPitch = 0f;
+        cycleTimer         = 0;
+        prevAssistYaw      = 0f;
+        prevAssistPitch    = 0f;
         candidateCache.clear();
         if (mc.player != null) {
-            lastPlayerYaw = mc.player.getYaw();
+            lastPlayerYaw   = mc.player.getYaw();
             lastPlayerPitch = mc.player.getPitch();
         } else {
-            lastPlayerYaw = 0f;
+            lastPlayerYaw   = 0f;
             lastPlayerPitch = 0f;
         }
     }
 
-    @Override
-    public void onActivate() {
-        resetState();
-        if (mc.world != null) {
-            lastWorld = mc.world;
-        }
-    }
-
-    @Override
-    public void onDeactivate() {
-        resetState();
-        lastWorld = null;
-    }
+    @Override public void onActivate()   { resetState(); lastWorld = mc.world; }
+    @Override public void onDeactivate() { resetState(); lastWorld = null; }
 
     @EventHandler
-    private void onGameLeft(GameLeftEvent event) {
-        resetState();
-        lastWorld = null;
-    }
+    private void onGameLeft(GameLeftEvent event)     { resetState(); lastWorld = null; }
 
     @EventHandler
     private void onGameJoined(GameJoinedEvent event) {
         resetState();
-        if (mc.world != null) {
-            lastWorld = mc.world;
-        }
+        lastWorld = mc.world;
     }
 
+    // ------------------------------------------------------------------ helpers
     private boolean isHoldingWeapon() {
         if (mc.player == null) return false;
         String name = mc.player.getMainHandStack().getItem().toString().toLowerCase();
-        return name.contains("sword") ||
-               name.contains("axe") ||
-               name.contains("trident") ||
-               name.contains("mace");
+        return name.contains("sword") || name.contains("axe")
+            || name.contains("trident") || name.contains("mace");
     }
 
     /**
-     * Public API method for KillAura and external combat modules with Freedom Hitbox Roaming.
+     * Smooth-step sigmoid: maps t in [0,1] → [0,1] via 3t²-2t³.
+     * Returns values in (0, 1) for any positive input by normalising first.
+     *
+     * @param angular  absolute angular distance to target (degrees)
+     * @param refArc   reference distance that maps to the sigmoid inflection (degrees)
+     */
+    private static double sigmoid(double angular, double refArc) {
+        double t = MathHelper.clamp(angular / refArc, 0.0, 1.0);
+        // smooth-step: fast start, soft finish
+        return t * t * (3.0 - 2.0 * t);
+    }
+
+    /**
+     * Computes the per-tick assist step using the sigmoidal interpolation curve.
+     *
+     * Design:
+     *  • At large angles the sigmoid returns values close to 1.0 → full-speed snap.
+     *  • As the angle shrinks below refArc the curve decelerates organically,
+     *    giving the wrist-deceleration feel without any linear cap.
+     *  • A velocity floor ensures we never fall behind a strafing/sprinting target.
+     *
+     * @param absAngle      remaining angular error (degrees, positive)
+     * @param maxTickSpeed  configured peak speed in degrees/tick
+     * @param glue          sticky-glue factor [0.1, 1.0]
+     * @param smooth        smoothness [0.01, 0.99]  (higher = slower acceleration start)
+     * @param minFloor      minimum step regardless of curve (deg/tick) — keeps up with target
+     * @return step size in degrees/tick (unsigned, always ≥ minFloor)
+     */
+    private static float computeStep(double absAngle,
+                                     float  maxTickSpeed,
+                                     double glue,
+                                     double smooth,
+                                     float  minFloor) {
+        // Reference arc scales with glue: tighter glue → faster lock-in
+        double refArc = MathHelper.clamp(18.0 * (1.0 - glue * 0.55), 4.0, 20.0);
+
+        // Sigmoid value: 0 at distance=0, approaches 1 far away
+        double sig = sigmoid(absAngle, refArc);
+
+        // Smoothness damps the sigmoid output (lower smooth → sig passes through more)
+        double dampedSig = sig * (1.0 - smooth * 0.45);
+
+        float step = (float) (maxTickSpeed * dampedSig);
+
+        // Velocity floor: guarantees tracking speed ≥ target apparent angular speed
+        step = Math.max(step, minFloor);
+
+        // Hard cap: never exceed the configured peak speed
+        step = Math.min(step, maxTickSpeed);
+
+        // Never overshoot the remaining error
+        step = (float) Math.min(step, absAngle);
+
+        return step;
+    }
+
+    // ------------------------------------------------------------------ public API
+    /**
+     * Returns {yaw, pitch} aimed at the tick-compensated intercept point of targetEntity.
+     * Includes kinematic intercept, strafe compensation, and hitbox roaming.
+     * Returns null if inputs are invalid or produce NaN/Infinite angles.
      */
     public float[] getAimAngles(Entity targetEntity) {
         if (targetEntity == null || mc.player == null) return null;
-        Vec3d eye = mc.player.getEyePos();
-        Vec3d point = AimUtils.getAimPoint(targetEntity, hitboxTarget.get(), prediction.get(), predictionTicks.get());
 
-        // Freedom Hitbox Roaming: Allows organic cursor navigation and wandering inside the enemy BoundingBox
-        if (hitboxRoaming.get() > 0.0) {
-            Box box = targetEntity.getBoundingBox();
-            if (box != null) {
-                double width = box.maxX - box.minX;
-                double height = box.maxY - box.minY;
-                double time = System.currentTimeMillis() * 0.002;
-                double offsetX = Math.sin(time * 2.1) * (width * 0.35) * hitboxRoaming.get();
-                double offsetZ = Math.cos(time * 1.7) * (width * 0.35) * hitboxRoaming.get();
-                double offsetY = Math.sin(time * 2.8) * (height * 0.2) * hitboxRoaming.get();
-                point = point.add(offsetX, offsetY, offsetZ);
-            }
-        }
+        Vec3d eye   = mc.player.getEyePos();
+        Vec3d point = buildInterceptPoint(targetEntity);
 
-        if (strafeCompensation.get() && targetEntity instanceof LivingEntity living) {
-            point = point.add(living.getVelocity().multiply(0.4));
-        }
-        float yaw = (float) AimUtils.getYaw(eye, point);
+        float yaw   = (float) AimUtils.getYaw(eye, point);
         float pitch = (float) MathHelper.clamp(AimUtils.getPitch(eye, point), -90.0, 90.0);
 
-        // Protocol Safety Check: Prevent NaN or Infinite angles from generating invalid packets
-        if (Float.isNaN(yaw) || Float.isInfinite(yaw) || Float.isNaN(pitch) || Float.isInfinite(pitch)) {
-            return null;
-        }
-
-        return new float[]{yaw, pitch};
+        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) return null;
+        return new float[]{ yaw, pitch };
     }
 
+    /**
+     * Builds the tick-compensated intercept aim point for a given entity.
+     *
+     * Steps:
+     *  1. Obtain the base hitbox centroid for the chosen AimPart.
+     *  2. Apply kinematic intercept: advance the point by the target's relative
+     *     velocity vector scaled by predictionTicks, compensating for player motion.
+     *  3. Apply hitbox roaming offset so the aim wanders naturally inside the box.
+     */
+    private Vec3d buildInterceptPoint(Entity entity) {
+        // ── 1. base hitbox centroid ──────────────────────────────────────────
+        Vec3d base = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+
+        // ── 2. kinematic intercept ───────────────────────────────────────────
+        if (prediction.get() && mc.player != null) {
+            Vec3d targetVel = entity.getVelocity();
+            Vec3d playerVel = mc.player.getVelocity();
+            int   ticks     = predictionTicks.get();
+
+            // Subtract 40 % of player velocity to account for relative motion
+            double relX = (targetVel.x - playerVel.x * 0.40) * ticks;
+            double relZ = (targetVel.z - playerVel.z * 0.40) * ticks;
+            // Vertical: full target jump arc, no player subtract (we aim at a fixed Y band)
+            double relY = targetVel.y * 0.55 * ticks;
+
+            // Clamp intercept displacement to within the target's bounding box size
+            // to prevent over-leading that misses the hitbox entirely
+            Box box = entity.getBoundingBox();
+            double maxH = (box.maxX - box.minX) * 1.5;
+            double maxV = (box.maxY - box.minY) * 0.8;
+            relX = MathHelper.clamp(relX, -maxH, maxH);
+            relZ = MathHelper.clamp(relZ, -maxH, maxH);
+            relY = MathHelper.clamp(relY, -maxV, maxV);
+
+            base = base.add(relX, relY, relZ);
+        }
+
+        // ── 3. hitbox roaming ────────────────────────────────────────────────
+        if (hitboxRoaming.get() > 0.0) {
+            Box    box    = entity.getBoundingBox();
+            double width  = box.maxX - box.minX;
+            double height = box.maxY - box.minY;
+            double t      = System.currentTimeMillis() * 0.0022;
+
+            double ox = Math.sin(t * 2.3) * width  * 0.28 * hitboxRoaming.get();
+            double oz = Math.cos(t * 1.8) * width  * 0.28 * hitboxRoaming.get();
+            double oy = Math.sin(t * 3.0) * height * 0.16 * hitboxRoaming.get();
+
+            base = base.add(ox, oy, oz);
+        }
+
+        return base;
+    }
+
+    // ------------------------------------------------------------------ tick
     @EventHandler
     private void onTick(TickEvent.Post event) {
         try {
+            // ── sanity guards ────────────────────────────────────────────────
             if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
-                resetState();
-                return;
+                resetState(); return;
             }
-
-            // World change / dimension transfer detection
             if (mc.world != lastWorld) {
-                lastWorld = mc.world;
-                resetState();
-                return;
+                lastWorld = mc.world; resetState(); return;
             }
 
-            // Rate limiter: prevent redundant high-frequency rotation computations that saturate render matrix buffers
+            // 20-tick rate-limit: do nothing if called more than once per ~10 ms
             long now = System.currentTimeMillis();
-            if (now - lastTickTime < 10L) {
-                return;
-            }
-            lastTickTime = now;
+            if (now - lastTickMs < 10L) return;
+            lastTickMs = now;
 
-            // Target validity check (entity dead, despawned, removed or world changed)
-            if (target != null && (target.isRemoved() || !target.isAlive() || target.getEntityWorld() != mc.world)) {
+            // stale target cleanup
+            if (target != null &&
+                (target.isRemoved() || !target.isAlive() || target.getEntityWorld() != mc.world)) {
                 target = null;
             }
 
-            // Protocol Safety Check: Validate current player view angles
-            if (Float.isNaN(mc.player.getYaw()) || Float.isInfinite(mc.player.getYaw()) ||
-                Float.isNaN(mc.player.getPitch()) || Float.isInfinite(mc.player.getPitch())) {
-                mc.player.setYaw(0f);
-                mc.player.setPitch(0f);
-                return;
+            // angle sanity
+            if (!Float.isFinite(mc.player.getYaw()) || !Float.isFinite(mc.player.getPitch())) {
+                mc.player.setYaw(0f); mc.player.setPitch(0f); return;
             }
 
-            // Manual Mouse Override Check using mouseThreshold
-            float currentYaw = mc.player.getYaw();
+            float currentYaw   = mc.player.getYaw();
             float currentPitch = mc.player.getPitch();
-            if (mouseThreshold.get() > 0.0) {
-                float playerDeltaYaw = Math.abs(MathHelper.wrapDegrees(currentYaw - lastPlayerYaw));
-                float playerDeltaPitch = Math.abs(currentPitch - lastPlayerPitch);
-                if (playerDeltaYaw > mouseThreshold.get() + Math.abs(previousStepYaw) ||
-                    playerDeltaPitch > mouseThreshold.get() + Math.abs(previousStepPitch)) {
-                    lastPlayerYaw = currentYaw;
-                    lastPlayerPitch = currentPitch;
-                    return;
-                }
-            }
 
+            // ── isolate raw manual mouse delta this tick ─────────────────────
+            // Manual delta = (new angle − last angle) − assist applied last tick
+            float manualDeltaYaw   = MathHelper.wrapDegrees(
+                (currentYaw   - prevAssistYaw)   - lastPlayerYaw);
+            float manualDeltaPitch = (currentPitch - prevAssistPitch) - lastPlayerPitch;
+
+            // ── guard checks ─────────────────────────────────────────────────
             if (onlyWhenClicking.get() && (mc.options == null || !mc.options.attackKey.isPressed())) {
-                target = null;
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
+                clearAssist(currentYaw, currentPitch); return;
             }
-
             if (weaponOnly.get() && !isHoldingWeapon()) {
-                target = null;
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
+                clearAssist(currentYaw, currentPitch); return;
             }
 
             if (switchCooldownTicks > 0) switchCooldownTicks--;
-            if (cycleTimer > 0) cycleTimer--;
-            if (targetSwitchProgressTicks < 6) targetSwitchProgressTicks++;
+            if (cycleTimer         > 0) cycleTimer--;
 
+            // ── target acquisition ───────────────────────────────────────────
             Entity found = findBestTarget();
-            if (found != target) {
-                target = found;
-                onTargetChanged();
-            }
+            if (found != target) { target = found; onTargetChanged(); }
 
-            if (target == null) {
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
-            }
+            if (target == null) { clearAssist(currentYaw, currentPitch); return; }
 
-            if (realisticTiming.get() && System.currentTimeMillis() < reactionReadyAt) {
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
+            if (realisticTiming.get() && now < reactionReadyAt) {
+                lastPlayerYaw = currentYaw; lastPlayerPitch = currentPitch; return;
             }
-
             if (requireAttackCooldown.get() && mc.player.getAttackCooldownProgress(0.5f) < 1.0f) {
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
+                lastPlayerYaw = currentYaw; lastPlayerPitch = currentPitch; return;
             }
 
-            float[] targetAngles = getAimAngles(target);
-            if (targetAngles == null) {
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
-                return;
-            }
-            double targetYaw = targetAngles[0];
-            double targetPitch = targetAngles[1];
+            // ── compute target angles ────────────────────────────────────────
+            float[] angles = getAimAngles(target);
+            if (angles == null) { clearAssist(currentYaw, currentPitch); return; }
 
-            Vec3d eye = mc.player.getEyePos();
-            Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), prediction.get(), predictionTicks.get());
+            double wantedYaw   = angles[0];
+            double wantedPitch = angles[1];
 
-            if (autoAttack.get() && mc.interactionManager != null && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
-                Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
+            // ── auto-attack ──────────────────────────────────────────────────
+            if (autoAttack.get() && mc.interactionManager != null
+                && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
+                Vec3d eye   = mc.player.getEyePos();
+                Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0);
+                Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
                 if (AimUtils.getAngle(look, eye, point) < 5.0) {
                     mc.interactionManager.attackEntity(mc.player, target);
                     mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 }
             }
 
-            if (releaseAngle.get() < 180.0) {
-                Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
-                if (AimUtils.getAngle(look, eye, point) > releaseAngle.get()) {
-                    target = null;
-                    lastPlayerYaw = currentYaw;
-                    lastPlayerPitch = currentPitch;
-                    return;
-                }
+            // ── escape-angle guard (replaces old release-angle + mouse-threshold) ──
+            // Only strip the assist when the user deliberately steers away; never
+            // penalise movement toward the target.
+            Vec3d eye   = mc.player.getEyePos();
+            Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0);
+            Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
+            double currentAngleToTarget = AimUtils.getAngle(look, eye, point);
+
+            boolean playerSteeringAway =
+                Math.abs(manualDeltaYaw) > 0.25f
+                && Math.signum(manualDeltaYaw) != Math.signum(
+                      MathHelper.wrapDegrees(wantedYaw - currentYaw));
+
+            if (playerSteeringAway && currentAngleToTarget > escapeAngle.get()) {
+                clearAssist(currentYaw, currentPitch); return;
             }
 
-            // === Ultra-Subtle Micro-Noise (Heuristic Evasion) ===
+            // ── micro-noise (heuristic evasion) ──────────────────────────────
             if (humanVariation.get() > 0) {
-                double time = System.currentTimeMillis() * 0.0008;
-                double noiseYaw = (Math.sin(time * 2.1) * 0.5 + Math.sin(time * 4.3) * 0.25) * humanVariation.get() * 0.35;
-                double noisePitch = (Math.cos(time * 2.5) * 0.4 + Math.sin(time * 5.1) * 0.2) * humanVariation.get() * 0.25;
-                targetYaw += noiseYaw;
-                targetPitch = MathHelper.clamp(targetPitch + noisePitch, -90.0, 90.0);
+                double t      = now * 0.00085;
+                double noiseY = (Math.sin(t * 2.1) * 0.5 + Math.sin(t * 4.3) * 0.25)
+                                * humanVariation.get() * 0.28;
+                double noiseP = (Math.cos(t * 2.5) * 0.4 + Math.sin(t * 5.1) * 0.2)
+                                * humanVariation.get() * 0.18;
+                wantedYaw   += noiseY;
+                wantedPitch  = MathHelper.clamp(wantedPitch + noiseP, -90.0, 90.0);
             }
 
-            // === GCD Fix & Sub-Pixel Deadzone (Grim & Vulcan Sensitivity Grid Bypass) ===
+            // ── GCD quantisation (pre-delta) ──────────────────────────────────
             if (gcdFix.get()) {
-                targetYaw = RotationUtils.applyGCD(mc.player.getYaw(), targetYaw);
-                targetPitch = RotationUtils.applyGCD(mc.player.getPitch(), targetPitch);
+                wantedYaw   = RotationUtils.applyGCD(currentYaw,   wantedYaw);
+                wantedPitch = RotationUtils.applyGCD(currentPitch, wantedPitch);
             }
 
-            double rawDeltaYaw = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
-            double rawDeltaPitch = targetPitch - mc.player.getPitch();
+            double rawDeltaYaw   = MathHelper.wrapDegrees(wantedYaw   - currentYaw);
+            double rawDeltaPitch = wantedPitch - currentPitch;
+            double absYaw        = Math.abs(rawDeltaYaw);
+            double absPitch      = Math.abs(rawDeltaPitch);
 
-            // GCD Sub-Pixel Deadzone to eliminate flicker without killing fine tracking
-            if (gcdFix.get() && mc.options != null) {
-                float sensitivity = (float) (mc.options.getMouseSensitivity().getValue() * 0.6 + 0.2);
-                double gcd = sensitivity * sensitivity * sensitivity * 1.2;
-                if (Math.abs(rawDeltaYaw) < gcd * 0.2) rawDeltaYaw = 0.0;
-                if (Math.abs(rawDeltaPitch) < gcd * 0.2) rawDeltaPitch = 0.0;
+            if (absYaw < 0.0005 && absPitch < 0.0005) {
+                clearAssist(currentYaw, currentPitch); return;
             }
 
-            double absYaw = Math.abs(rawDeltaYaw);
-            double absPitch = Math.abs(rawDeltaPitch);
+            // ── sigmoid step calculation ──────────────────────────────────────
+            float maxYawTick   = (float) (horizontalSpeed.get() / 20.0);
+            float maxPitchTick = (float) (verticalSpeed.get()   / 20.0);
+            double glue        = MathHelper.clamp(stickyGlue.get(), 0.1, 1.0);
+            double smooth      = MathHelper.clamp(smoothness.get(), 0.01, 0.99);
 
-            if (absYaw < 0.001 && absPitch < 0.001) {
-                previousStepYaw = 0f;
-                previousStepPitch = 0f;
-                lastPlayerYaw = mc.player.getYaw();
-                lastPlayerPitch = mc.player.getPitch();
-                return;
-            }
-
-            float baseStepH = (float) (horizontalSpeed.get() / 20.0);
-            float baseStepV = (float) (verticalSpeed.get() / 20.0);
-
-            // === DEMONCLIENT v2.2 ELASTIC STICKY GLUE CALIBRATION ===
-            double glue = MathHelper.clamp(stickyGlue.get(), 0.1, 1.0);
-            double smooth = MathHelper.clamp(smoothness.get(), 0.01, 0.99);
-
-            // Proportional attraction: scales directly with enemy displacement for instant adherence
-            double propYaw = absYaw * (0.22 + 0.38 * glue);
-            double propPitch = absPitch * (0.20 + 0.35 * glue);
-
-            // Eased base speed component using sine interpolation (maintains healthy pull at all angles)
-            double easeYaw = Math.sin(MathHelper.clamp(absYaw / 40.0, 0.08, 1.0) * (Math.PI / 2.0));
-            double easePitch = Math.sin(MathHelper.clamp(absPitch / 25.0, 0.08, 1.0) * (Math.PI / 2.0));
-
-            float rawStepYaw = (float) (propYaw + baseStepH * easeYaw * glue * 0.55);
-            float rawStepPitch = (float) (propPitch + baseStepV * easePitch * glue * 0.55);
-
-            // Target Switch Progressive Sine Fade-In (40% initial grip, reaches 100% in 6 ticks)
-            float rampProgress = Math.min(6, targetSwitchProgressTicks) / 6.0f;
-            float switchRamp = 0.40f + 0.60f * (float) Math.sin(rampProgress * (Math.PI / 2.0));
-            rawStepYaw *= switchRamp;
-            rawStepPitch *= switchRamp;
-
-            // Micro-Magnetism: reinforces glue tracking when crosshair nears target center
-            if (microMagnetism.get() > 0 && absYaw < 14.0) {
-                double magnetFactor = (1.0 - (absYaw / 14.0)) * microMagnetism.get() * 0.5;
-                rawStepYaw *= (float) (1.0 + magnetFactor);
-            }
-            if (microMagnetism.get() > 0 && absPitch < 12.0) {
-                double magnetFactor = (1.0 - (absPitch / 12.0)) * microMagnetism.get() * 0.5;
-                rawStepPitch *= (float) (1.0 + magnetFactor);
-            }
-
-            // Minimum active step: guarantees immediate tracking response against strafing
-            float minStepYaw = (float) Math.max(0.4, absYaw * 0.20 * glue);
-            float minStepPitch = (float) Math.max(0.3, absPitch * 0.20 * glue);
-            rawStepYaw = Math.max(minStepYaw, rawStepYaw);
-            rawStepPitch = Math.max(minStepPitch, rawStepPitch);
-
-            // Dynamic Inertia Smoothing (preserves fluid human momentum without feeling sluggish)
-            float inertia = (float) (0.12 + smooth * 0.22); // ~0.28 inertia with smooth=0.72
-            float stepYaw = previousStepYaw * inertia + rawStepYaw * (1.0f - inertia);
-            float stepPitch = previousStepPitch * inertia + rawStepPitch * (1.0f - inertia);
-            previousStepYaw = stepYaw;
-            previousStepPitch = stepPitch;
-
-            // Strict Anti-Cheat Safe Max Absolute Speed Ceiling
-            float maxAbs = maxAbsoluteSpeed.get().floatValue();
-            stepYaw = Math.min(maxAbs, Math.max(0.05f, stepYaw));
-            stepPitch = Math.min(maxAbs, Math.max(0.05f, stepPitch));
-
-            // === PROTOCOL-SAFE ADDITIVE PULL ASSIST APPLICATION ===
-            if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
-                float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
-                float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
-
-                if (gcdFix.get()) {
-                    yawStep = (float) (RotationUtils.applyGCD(mc.player.getYaw(), mc.player.getYaw() + yawStep) - mc.player.getYaw());
-                    pitchStep = (float) (RotationUtils.applyGCD(mc.player.getPitch(), mc.player.getPitch() + pitchStep) - mc.player.getPitch());
-                }
-
-                float finalYaw = mc.player.getYaw() + yawStep;
-                float finalPitch = MathHelper.clamp(mc.player.getPitch() + pitchStep, -90.0f, 90.0f);
-
-                // Strict Protocol Validation & Threshold Guard
-                if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
-                    !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
-                    if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
-                        mc.player.setYaw(finalYaw);
-                        mc.player.setPitch(finalPitch);
-                    }
-                }
-            } else {
-                float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
-                float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
-                float finalYaw = (float) Rotations.serverYaw + yawStep;
-                float finalPitch = MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90.0f, 90.0f);
-
-                if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
-                    !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
-                    if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
-                        Rotations.rotate(finalYaw, finalPitch);
-                    }
+            // Velocity floor: angular speed the target appears to move per tick.
+            // Estimated from target entity velocity projected onto the screen plane.
+            float targetAngularSpeedYaw = 0f, targetAngularSpeedPitch = 0f;
+            if (target != null) {
+                Vec3d vel    = target.getVelocity();
+                Vec3d eyePos = mc.player.getEyePos();
+                Vec3d dir    = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0)
+                                      .subtract(eyePos);
+                double dist  = dir.length();
+                if (dist > 0.01) {
+                    // Lateral component of target velocity perpendicular to view ray
+                    Vec3d dirN  = dir.normalize();
+                    Vec3d perpH = new Vec3d(-dirN.z, 0, dirN.x); // horizontal perp
+                    double latV = Math.abs(vel.subtract(dirN.multiply(vel.dotProduct(dirN)))
+                                             .dotProduct(perpH));
+                    // Convert linear speed at distance dist to angular deg/tick
+                    targetAngularSpeedYaw   = (float) Math.toDegrees(Math.atan2(latV, dist));
+                    targetAngularSpeedPitch = targetAngularSpeedYaw * 0.5f;
                 }
             }
 
-            lastPlayerYaw = mc.player.getYaw();
+            // Floor = max(target angular speed, small minimum keep-alive)
+            float floorYaw   = Math.max(targetAngularSpeedYaw,   0.25f);
+            float floorPitch = Math.max(targetAngularSpeedPitch, 0.15f);
+
+            // Scale floor by glue so tighter glue gives slightly higher floor
+            floorYaw   *= (float) (0.8 + 0.2 * glue);
+            floorPitch *= (float) (0.8 + 0.2 * glue);
+
+            float stepYaw   = computeStep(absYaw,   maxYawTick,   glue, smooth, floorYaw);
+            float stepPitch = computeStep(absPitch, maxPitchTick, glue, smooth, floorPitch);
+
+            // ── micro-magnetism inside hitbox (<6°) ────────────────────────
+            if (microMagnetism.get() > 0.0 && absYaw < 6.0) {
+                double mag = (1.0 - absYaw / 6.0) * microMagnetism.get() * 0.30;
+                stepYaw   += (float) (stepYaw * mag);
+            }
+            if (microMagnetism.get() > 0.0 && absPitch < 5.0) {
+                double mag = (1.0 - absPitch / 5.0) * microMagnetism.get() * 0.30;
+                stepPitch += (float) (stepPitch * mag);
+            }
+
+            // ── active flick synergy (player moving toward target) ──────────
+            boolean flickingToward =
+                Math.abs(manualDeltaYaw) > 0.20f
+                && Math.signum(manualDeltaYaw) == Math.signum(rawDeltaYaw);
+            if (flickingToward) {
+                stepYaw   = Math.min(maxYawTick,   stepYaw   * 1.30f);
+                stepPitch = Math.min(maxPitchTick, stepPitch * 1.25f);
+            }
+
+            // final signed steps
+            float yawStep   = stepYaw   * (float) Math.signum(rawDeltaYaw);
+            float pitchStep = stepPitch * (float) Math.signum(rawDeltaPitch);
+
+            // ── GCD quantisation (post-step) ──────────────────────────────────
+            if (gcdFix.get()) {
+                yawStep   = (float) (RotationUtils.applyGCD(currentYaw,   currentYaw   + yawStep)   - currentYaw);
+                pitchStep = (float) (RotationUtils.applyGCD(currentPitch, currentPitch + pitchStep) - currentPitch);
+            }
+
+            // ── apply rotations (additive, non-hijacking) ────────────────────
+            float finalYaw   = currentYaw   + yawStep;
+            float finalPitch = MathHelper.clamp(currentPitch + pitchStep, -90.0f, 90.0f);
+
+            if (!Float.isFinite(finalYaw) || !Float.isFinite(finalPitch)) {
+                clearAssist(currentYaw, currentPitch); return;
+            }
+
+            if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
+                if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
+                    mc.player.setYaw(finalYaw);
+                    mc.player.setPitch(finalPitch);
+                } else {
+                    Rotations.rotate(
+                        (float) Rotations.serverYaw   + yawStep,
+                        MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90f, 90f)
+                    );
+                }
+            }
+
+            prevAssistYaw   = yawStep;
+            prevAssistPitch = pitchStep;
+            lastPlayerYaw   = mc.player.getYaw();
             lastPlayerPitch = mc.player.getPitch();
+
         } catch (Throwable t) {
-            // Failsafe exception isolation: disable module gracefully to prevent client crash
-            error("Disabling AdvancedAimAssist due to runtime error: " + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
+            error("AimAssist error: " + (t.getMessage() != null
+                  ? t.getMessage() : t.getClass().getSimpleName()));
             resetState();
-            if (isActive()) {
-                toggle();
-            }
+            if (isActive()) toggle();
         }
     }
 
+    /** Zero-out assist bookkeeping and record current angles as baseline. */
+    private void clearAssist(float y, float p) {
+        prevAssistYaw   = 0f;
+        prevAssistPitch = 0f;
+        lastPlayerYaw   = y;
+        lastPlayerPitch = p;
+        target          = null;
+    }
+
+    // ------------------------------------------------------------------ render
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
-            target = null;
-            return;
-        }
-
+        if (mc.player == null || mc.world == null || !mc.player.isAlive()) { target = null; return; }
         if (renderCircle.get() && target != null && !AimUtils.isDead(target)) {
-            try {
-                renderTargetCircle(event);
-            } catch (Throwable ignored) {
-                // Buffer/matrix protection against native OpenGL crash
-            }
+            try { renderTargetCircle(event); } catch (Throwable ignored) {}
         }
     }
 
+    // ------------------------------------------------------------------ targeting
     private void onTargetChanged() {
         switchCooldownTicks = switchCooldown.get();
-        targetSwitchProgressTicks = 0;
-        previousStepYaw = 0f;
-        previousStepPitch = 0f;
+        prevAssistYaw       = 0f;
+        prevAssistPitch     = 0f;
         if (!realisticTiming.get() || target == null) {
-            reactionReadyAt = 0;
+            reactionReadyAt = 0L;
         } else {
-            int min = Math.min(reactionTimeMin.get(), reactionTimeMax.get());
-            int max = Math.max(reactionTimeMin.get(), reactionTimeMax.get());
-            reactionReadyAt = System.currentTimeMillis() + ThreadLocalRandom.current().nextLong(min, max + 1L);
+            int lo = Math.min(reactionTimeMin.get(), reactionTimeMax.get());
+            int hi = Math.max(reactionTimeMin.get(), reactionTimeMax.get());
+            reactionReadyAt = System.currentTimeMillis()
+                            + ThreadLocalRandom.current().nextLong(lo, (long) hi + 1);
         }
     }
 
     private Entity findBestTarget() {
-        if (sticky.get() && target != null && isValidStickyTarget(target)) {
-            if (switchCooldownTicks > 0) {
-                return target;
-            }
+        if (sticky.get() && target != null && isValidStickyTarget(target) && switchCooldownTicks > 0) {
+            return target;
         }
 
-        Vec3d eye = mc.player.getEyePos();
-        Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
+        Vec3d  eye     = mc.player.getEyePos();
+        Vec3d  look    = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
         double halfFov = fov.get() / 2.0;
         boolean useFov = fov.get() < 360.0;
 
         candidateCache.clear();
-
         for (Entity entity : mc.world.getEntities()) {
             if (!isValidTarget(entity)) continue;
-
-            Vec3d point = AimUtils.getAimPoint(entity, hitboxTarget.get(), prediction.get(), predictionTicks.get());
+            Vec3d  point    = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
             double distance = eye.distanceTo(point);
             if (distance > range.get()) continue;
-
-            double angle = AimUtils.getAngle(look, eye, point);
-            if (useFov && angle > halfFov) continue;
-
+            if (useFov && AimUtils.getAngle(look, eye, point) > halfFov) continue;
             if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
-
             candidateCache.add(entity);
         }
 
-        if (candidateCache.isEmpty()) {
-            return null;
-        }
+        if (candidateCache.isEmpty()) return null;
 
         candidateCache.sort((e1, e2) -> {
             Vec3d p1 = AimUtils.getAimPoint(e1, hitboxTarget.get(), false, 0);
             Vec3d p2 = AimUtils.getAimPoint(e2, hitboxTarget.get(), false, 0);
-            double d1 = eye.distanceTo(p1);
-            double d2 = eye.distanceTo(p2);
-            if (priority.get() == TargetPriority.Closest) {
-                return Double.compare(d1, d2);
-            } else if (priority.get() == TargetPriority.LowestHealth) {
-                return Float.compare(AimUtils.getHealth(e1), AimUtils.getHealth(e2));
-            } else {
-                double a1 = AimUtils.getAngle(look, eye, p1);
-                double a2 = AimUtils.getAngle(look, eye, p2);
-                return Double.compare(a1, a2);
-            }
+            return switch (priority.get()) {
+                case LowestHealth -> Float.compare(AimUtils.getHealth(e1), AimUtils.getHealth(e2));
+                case Angle        -> Double.compare(
+                    AimUtils.getAngle(look, eye, p1),
+                    AimUtils.getAngle(look, eye, p2));
+                default           -> Double.compare(eye.distanceTo(p1), eye.distanceTo(p2));
+            };
         });
 
         return candidateCache.get(0);
     }
 
-    /**
-     * Strict Player-Only Validation Filter (Ignores mobs, animals, and non-player entities entirely)
-     */
     private boolean isValidTarget(Entity entity) {
         if (entity == null || entity == mc.player || entity == mc.getCameraEntity()) return false;
-        
-        // Strict player check: discard anything that is not a real PlayerEntity immediately
         if (!(entity instanceof PlayerEntity player)) return false;
-
         if (player.isSpectator() || player.isCreative()) return false;
         if (entity.isRemoved() || AimUtils.isDead(entity)) return false;
         if (ignoreInvisible.get() && entity.isInvisible()) return false;
         if (!entities.get().isEmpty() && !entities.get().contains(entity.getType())) return false;
         if (ignoreFriends.get() && !Friends.get().shouldAttack(player)) return false;
-
         return true;
     }
 
     private boolean isValidStickyTarget(Entity entity) {
         if (!isValidTarget(entity)) return false;
-        Vec3d eye = mc.player.getEyePos();
-        Vec3d point = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
-        double effectiveUnlockRange = Math.max(unlockRange.get(), range.get() + 0.5);
-
-        if (eye.distanceTo(point) > effectiveUnlockRange) return false;
+        Vec3d  eye   = mc.player.getEyePos();
+        Vec3d  point = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+        double eff   = Math.max(unlockRange.get(), range.get() + 0.5);
+        if (eye.distanceTo(point) > eff) return false;
         if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) return false;
-        return true;
+        Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
+        return AimUtils.getAngle(look, eye, point) <= escapeAngle.get();
     }
 
+    // ------------------------------------------------------------------ render circle
     /**
-     * Render target circle with guaranteed buffer capacity protection against native crash 0xc0000409.
+     * Renders the target ring.  Buffer capacity is pre-allocated to prevent native
+     * OpenGL vertex-buffer overrun crash (exit code 0xc0000409).
      */
     private void renderTargetCircle(Render3DEvent event) {
-        if (event == null || event.renderer == null || target == null || target.isRemoved() || !target.isAlive()) return;
-        if (mc.world == null || target.getEntityWorld() != mc.world) {
-            target = null;
-            return;
-        }
+        if (event.renderer == null || target.isRemoved() || !target.isAlive()) return;
+        if (mc.world == null || target.getEntityWorld() != mc.world) { target = null; return; }
 
-        Box box = target.getBoundingBox();
+        Box    box      = target.getBoundingBox();
         if (box == null) return;
-        double x = (box.minX + box.maxX) / 2.0;
-        double z = (box.minZ + box.maxZ) / 2.0;
-        double y = box.minY + circleHeight.get();
 
-        int segments = MathHelper.clamp(circleSegments.get(), 8, 64);
-        double radius = circleRadius.get();
+        double cx  = (box.minX + box.maxX) / 2.0;
+        double cz  = (box.minZ + box.maxZ) / 2.0;
+        double cy  = box.minY + circleHeight.get();
+        int    seg = MathHelper.clamp(circleSegments.get(), 8, 64);
+        double r   = circleRadius.get();
         ShapeMode mode = circleShapeMode.get();
-
-        Color fill = circleFillColor.get();
+        Color fill    = circleFillColor.get();
         Color outline = circleOutlineColor.get();
 
         if (mode.sides() && fill != null && fill.a > 0) {
-            // Capacity protection: 1 center + (segments + 1) vertices = segments + 2. Allocate segments + 8 vertices, segments * 3 + 12 indices.
-            event.renderer.triangles.ensureCapacity(segments + 8, segments * 3 + 12);
-            int center = event.renderer.triangles.vec3(x, y, z).color(fill).next();
-            int previous = -1;
-
-            for (int i = 0; i <= segments; i++) {
-                double angle = 2.0 * Math.PI * i / segments;
-                int vertex = event.renderer.triangles
-                    .vec3(x + Math.cos(angle) * radius, y, z + Math.sin(angle) * radius)
+            event.renderer.triangles.ensureCapacity(seg + 8, seg * 3 + 12);
+            int center = event.renderer.triangles.vec3(cx, cy, cz).color(fill).next();
+            int prev = -1;
+            for (int i = 0; i <= seg; i++) {
+                double a = 2.0 * Math.PI * i / seg;
+                int v = event.renderer.triangles
+                    .vec3(cx + Math.cos(a) * r, cy, cz + Math.sin(a) * r)
                     .color(fill).next();
-                if (previous != -1) event.renderer.triangles.triangle(center, previous, vertex);
-                previous = vertex;
+                if (prev != -1) event.renderer.triangles.triangle(center, prev, v);
+                prev = v;
             }
         }
 
         if (mode.lines() && outline != null && outline.a > 0) {
-            // Capacity protection: allocate segments + 8 vertices, (segments + 2) * 2 + 12 indices.
-            event.renderer.lines.ensureCapacity(segments + 8, (segments + 2) * 2 + 12);
-            int first = -1, previous = -1;
-
-            for (int i = 0; i <= segments; i++) {
-                double angle = 2.0 * Math.PI * i / segments;
-                int vertex = event.renderer.lines
-                    .vec3(x + Math.cos(angle) * radius, y, z + Math.sin(angle) * radius)
+            event.renderer.lines.ensureCapacity(seg + 8, (seg + 2) * 2 + 12);
+            int first = -1, prev = -1;
+            for (int i = 0; i <= seg; i++) {
+                double a = 2.0 * Math.PI * i / seg;
+                int v = event.renderer.lines
+                    .vec3(cx + Math.cos(a) * r, cy, cz + Math.sin(a) * r)
                     .color(outline).next();
-                if (previous == -1) first = vertex;
-                else event.renderer.lines.line(previous, vertex);
-                previous = vertex;
+                if (prev   == -1) first = v;
+                else event.renderer.lines.line(prev, v);
+                prev = v;
             }
-            if (previous != -1 && first != -1) {
-                event.renderer.lines.line(previous, first);
-            }
+            if (prev != -1 && first != -1) event.renderer.lines.line(prev, first);
         }
     }
 
+    // ------------------------------------------------------------------ info
     @Override
     public String getInfoString() {
         return target != null ? AimUtils.getName(target) : null;
