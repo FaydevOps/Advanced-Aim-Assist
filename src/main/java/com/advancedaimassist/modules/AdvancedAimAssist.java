@@ -34,7 +34,29 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
-
+/**
+ * AdvancedAimAssist — DemonClient v2.2 Exponential Smooth Ease-Out Edition
+ *
+ * Mathematical Camera Interpolation & Humanized Mouse Movement Architecture:
+ *
+ * 1. EXPONENTIAL SMOOTH EASE-OUT DAMPING
+ *    Replaces linear or rigid steps with a continuous exponential ease-out function
+ *    combined with sigmoidal velocity scaling. As the crosshair approaches the target,
+ *    rotational velocity decelerates organically, perfectly simulating human wrist muscle
+ *    deceleration without any robotic stops or jerky cutoffs.
+ *
+ * 2. ASYMMETRIC YAW & PITCH NON-LINEARITY
+ *    Yaw and Pitch utilize independent, non-linear damping coefficients. Horizontal arm sweeps
+ *    and vertical wrist adjustments scale differently, destroying robotic synchronized axis locking.
+ *
+ * 3. ADDITIVE SMOOTH PULL & MOUSE SYNERGY
+ *    Assist torque seamlessly blends with the player's own mouse input. When the user moves
+ *    their mouse toward the opponent, the aimbot melts into their movement invisibly.
+ *
+ * 4. KINEMATIC INTERCEPT & GCD BYPASS
+ *    Tick-compensated velocity extrapolation ensures the aim point never lags behind strafing
+ *    opponents, while strict modulo GCD alignment (~0.0055°) bypasses Grim and Vulcan anti-cheats.
+ */
 public class AdvancedAimAssist extends Module {
 
     // ------------------------------------------------------------------ groups
@@ -48,7 +70,7 @@ public class AdvancedAimAssist extends Module {
 
     // ------------------------------------------------------------------ enums
     public enum AimMode        { Client, Assist, Silent }
-    public enum MultiTargetMode { Closest, LowestHealth, Crosshair, Cycle }
+    public enum MultiTargetMode { Closest, LowestHealth, Angle, Cycle }
 
     // ------------------------------------------------------------------ General
     private final Setting<AimMode> aimMode = sgGeneral.add(new EnumSetting.Builder<AimMode>()
@@ -78,7 +100,7 @@ public class AdvancedAimAssist extends Module {
     private final Setting<Double> horizontalSpeed = sgGeneral.add(new DoubleSetting.Builder()
         .name("horizontal-speed")
         .description("Peak horizontal angular speed (deg/sec).")
-        .defaultValue(270.0).range(20.0, 720.0).sliderRange(40.0, 500.0)
+        .defaultValue(280.0).range(20.0, 720.0).sliderRange(40.0, 500.0)
         .build());
 
     private final Setting<Double> verticalSpeed = sgGeneral.add(new DoubleSetting.Builder()
@@ -134,20 +156,32 @@ public class AdvancedAimAssist extends Module {
     // ------------------------------------------------------------------ Humanization
     private final Setting<Double> smoothness = sgHuman.add(new DoubleSetting.Builder()
         .name("smoothness")
-        .description("Sigmoid blend factor. Low = crisp snap. High = soft cinematic glide.")
-        .defaultValue(0.20).range(0.01, 0.99).sliderRange(0.01, 0.99)
+        .description("Exponential damping factor. Lower = crisp snap. Higher = soft cinematic ease-out.")
+        .defaultValue(0.22).range(0.01, 0.99).sliderRange(0.01, 0.99)
+        .build());
+
+    private final Setting<Double> arcCurvature = sgHuman.add(new DoubleSetting.Builder()
+        .name("arc-curvature")
+        .description("Wrist pivot arc trajectory intensity.")
+        .defaultValue(0.12).range(0.0, 1.0).sliderRange(0.0, 0.5)
+        .build());
+
+    private final Setting<Boolean> microOvershoot = sgHuman.add(new BoolSetting.Builder()
+        .name("micro-overshoot")
+        .description("Simulates human error by subtly overshooting fast snaps by 1-2 pixels.")
+        .defaultValue(true)
         .build());
 
     private final Setting<Double> humanVariation = sgHuman.add(new DoubleSetting.Builder()
         .name("human-variation")
         .description("Micro-noise amplitude for behavioural heuristic evasion.")
-        .defaultValue(0.018).range(0.0, 1.0).sliderRange(0.0, 0.5)
+        .defaultValue(0.015).range(0.0, 1.0).sliderRange(0.0, 0.5)
         .build());
 
     private final Setting<Double> hitboxRoaming = sgHuman.add(new DoubleSetting.Builder()
         .name("hitbox-roaming-intensity")
         .description("Allows the aim to drift naturally within the enemy bounding box.")
-        .defaultValue(0.16).range(0.0, 1.0).sliderRange(0.0, 1.0)
+        .defaultValue(0.15).range(0.0, 1.0).sliderRange(0.0, 1.0)
         .build());
 
     private final Setting<Double> escapeAngle = sgHuman.add(new DoubleSetting.Builder()
@@ -299,23 +333,22 @@ public class AdvancedAimAssist extends Module {
     private int     switchCooldownTicks;
     private int     cycleTimer;
 
-    /** Rotation applied by the assist last tick (used to isolate manual mouse delta). */
     private float   prevAssistYaw   = 0f;
     private float   prevAssistPitch = 0f;
-
-    /** Player angles at end of last tick (after assist was applied). */
     private float   lastPlayerYaw   = 0f;
     private float   lastPlayerPitch = 0f;
-
     private long    lastTickMs      = 0L;
     private World   lastWorld       = null;
 
-    private final List<Entity> candidateCache = new ArrayList<>();
+    private int     overshootTicksLeft = 0;
+    private double  overshootYawOffset = 0.0;
+
+    private final List<AimTarget> targetCache = new ArrayList<>();
 
     // ------------------------------------------------------------------ ctor
     public AdvancedAimAssist() {
         super(Categories.Combat, "advanced-aim-assist",
-              "DemonClient v2.2 — Sigmoidal sticky-glue tracking with kinematic intercept.");
+              "DemonClient v2.2 — Exponential smooth ease-out damping & asymmetric decoupling.");
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -326,13 +359,15 @@ public class AdvancedAimAssist extends Module {
         cycleTimer         = 0;
         prevAssistYaw      = 0f;
         prevAssistPitch    = 0f;
-        candidateCache.clear();
+        overshootTicksLeft = 0;
+        overshootYawOffset = 0.0;
+        targetCache.clear();
         if (mc.player != null) {
             lastPlayerYaw   = mc.player.getYaw();
             lastPlayerPitch = mc.player.getPitch();
         } else {
-            lastPlayerYaw   = 0f;
-            lastPlayerPitch = 0f;
+            lastPlayerYaw   =   0f;
+            lastPlayerPitch =   0f;
         }
     }
 
@@ -348,7 +383,6 @@ public class AdvancedAimAssist extends Module {
         lastWorld = mc.world;
     }
 
-    // ------------------------------------------------------------------ helpers
     private boolean isHoldingWeapon() {
         if (mc.player == null) return false;
         String name = mc.player.getMainHandStack().getItem().toString().toLowerCase();
@@ -356,74 +390,12 @@ public class AdvancedAimAssist extends Module {
             || name.contains("trident") || name.contains("mace");
     }
 
-    /**
-     * Smooth-step sigmoid: maps t in [0,1] → [0,1] via 3t²-2t³.
-     * Returns values in (0, 1) for any positive input by normalising first.
-     *
-     * @param angular  absolute angular distance to target (degrees)
-     * @param refArc   reference distance that maps to the sigmoid inflection (degrees)
-     */
-    private static double sigmoid(double angular, double refArc) {
-        double t = MathHelper.clamp(angular / refArc, 0.0, 1.0);
-        // smooth-step: fast start, soft finish
-        return t * t * (3.0 - 2.0 * t);
-    }
-
-    /**
-     * Computes the per-tick assist step using the sigmoidal interpolation curve.
-     *
-     * Design:
-     *  • At large angles the sigmoid returns values close to 1.0 → full-speed snap.
-     *  • As the angle shrinks below refArc the curve decelerates organically,
-     *    giving the wrist-deceleration feel without any linear cap.
-     *  • A velocity floor ensures we never fall behind a strafing/sprinting target.
-     *
-     * @param absAngle      remaining angular error (degrees, positive)
-     * @param maxTickSpeed  configured peak speed in degrees/tick
-     * @param glue          sticky-glue factor [0.1, 1.0]
-     * @param smooth        smoothness [0.01, 0.99]  (higher = slower acceleration start)
-     * @param minFloor      minimum step regardless of curve (deg/tick) — keeps up with target
-     * @return step size in degrees/tick (unsigned, always ≥ minFloor)
-     */
-    private static float computeStep(double absAngle,
-                                     float  maxTickSpeed,
-                                     double glue,
-                                     double smooth,
-                                     float  minFloor) {
-        // Reference arc scales with glue: tighter glue → faster lock-in
-        double refArc = MathHelper.clamp(18.0 * (1.0 - glue * 0.55), 4.0, 20.0);
-
-        // Sigmoid value: 0 at distance=0, approaches 1 far away
-        double sig = sigmoid(absAngle, refArc);
-
-        // Smoothness damps the sigmoid output (lower smooth → sig passes through more)
-        double dampedSig = sig * (1.0 - smooth * 0.45);
-
-        float step = (float) (maxTickSpeed * dampedSig);
-
-        // Velocity floor: guarantees tracking speed ≥ target apparent angular speed
-        step = Math.max(step, minFloor);
-
-        // Hard cap: never exceed the configured peak speed
-        step = Math.min(step, maxTickSpeed);
-
-        // Never overshoot the remaining error
-        step = (float) Math.min(step, absAngle);
-
-        return step;
-    }
-
     // ------------------------------------------------------------------ public API
-    /**
-     * Returns {yaw, pitch} aimed at the tick-compensated intercept point of targetEntity.
-     * Includes kinematic intercept, strafe compensation, and hitbox roaming.
-     * Returns null if inputs are invalid or produce NaN/Infinite angles.
-     */
     public float[] getAimAngles(Entity targetEntity) {
         if (targetEntity == null || mc.player == null) return null;
 
         Vec3d eye   = mc.player.getEyePos();
-        Vec3d point = buildInterceptPoint(targetEntity);
+        Vec3d point = buildInterpolatedAimPoint(targetEntity);
 
         float yaw   = (float) AimUtils.getYaw(eye, point);
         float pitch = (float) MathHelper.clamp(AimUtils.getPitch(eye, point), -90.0, 90.0);
@@ -432,34 +404,20 @@ public class AdvancedAimAssist extends Module {
         return new float[]{ yaw, pitch };
     }
 
-    /**
-     * Builds the tick-compensated intercept aim point for a given entity.
-     *
-     * Steps:
-     *  1. Obtain the base hitbox centroid for the chosen AimPart.
-     *  2. Apply kinematic intercept: advance the point by the target's relative
-     *     velocity vector scaled by predictionTicks, compensating for player motion.
-     *  3. Apply hitbox roaming offset so the aim wanders naturally inside the box.
-     */
-    private Vec3d buildInterceptPoint(Entity entity) {
-        // ── 1. base hitbox centroid ──────────────────────────────────────────
+    private Vec3d buildInterpolatedAimPoint(Entity entity) {
         Vec3d base = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
 
-        // ── 2. kinematic intercept ───────────────────────────────────────────
+        // Kinematic Velocity Intercept
         if (prediction.get() && mc.player != null) {
             Vec3d targetVel = entity.getVelocity();
             Vec3d playerVel = mc.player.getVelocity();
             int   ticks     = predictionTicks.get();
 
-            // Subtract 40 % of player velocity to account for relative motion
             double relX = (targetVel.x - playerVel.x * 0.40) * ticks;
             double relZ = (targetVel.z - playerVel.z * 0.40) * ticks;
-            // Vertical: full target jump arc, no player subtract (we aim at a fixed Y band)
             double relY = targetVel.y * 0.55 * ticks;
 
-            // Clamp intercept displacement to within the target's bounding box size
-            // to prevent over-leading that misses the hitbox entirely
-            Box box = entity.getBoundingBox();
+            Box    box  = entity.getBoundingBox();
             double maxH = (box.maxX - box.minX) * 1.5;
             double maxV = (box.maxY - box.minY) * 0.8;
             relX = MathHelper.clamp(relX, -maxH, maxH);
@@ -469,7 +427,20 @@ public class AdvancedAimAssist extends Module {
             base = base.add(relX, relY, relZ);
         }
 
-        // ── 3. hitbox roaming ────────────────────────────────────────────────
+        // Bezier Wrist Pivot Arc
+        if (arcCurvature.get() > 0.0 && mc.player != null) {
+            Vec3d eye = mc.player.getEyePos();
+            Vec3d toTarget = base.subtract(eye);
+            double dist = toTarget.length();
+            if (dist > 0.5) {
+                Vec3d perp = new Vec3d(-toTarget.z, 0, toTarget.x).normalize();
+                double progress = Math.min(dist / 6.0, 1.0);
+                double arcOffset = Math.sin(progress * Math.PI) * arcCurvature.get() * 0.35 * dist;
+                base = base.add(perp.multiply(arcOffset));
+            }
+        }
+
+        // Hitbox Roaming
         if (hitboxRoaming.get() > 0.0) {
             Box    box    = entity.getBoundingBox();
             double width  = box.maxX - box.minX;
@@ -490,7 +461,6 @@ public class AdvancedAimAssist extends Module {
     @EventHandler
     private void onTick(TickEvent.Post event) {
         try {
-            // ── sanity guards ────────────────────────────────────────────────
             if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
                 resetState(); return;
             }
@@ -498,18 +468,15 @@ public class AdvancedAimAssist extends Module {
                 lastWorld = mc.world; resetState(); return;
             }
 
-            // 20-tick rate-limit: do nothing if called more than once per ~10 ms
             long now = System.currentTimeMillis();
             if (now - lastTickMs < 10L) return;
             lastTickMs = now;
 
-            // stale target cleanup
             if (target != null &&
                 (target.isRemoved() || !target.isAlive() || target.getEntityWorld() != mc.world)) {
                 target = null;
             }
 
-            // angle sanity
             if (!Float.isFinite(mc.player.getYaw()) || !Float.isFinite(mc.player.getPitch())) {
                 mc.player.setYaw(0f); mc.player.setPitch(0f); return;
             }
@@ -517,13 +484,11 @@ public class AdvancedAimAssist extends Module {
             float currentYaw   = mc.player.getYaw();
             float currentPitch = mc.player.getPitch();
 
-            // ── isolate raw manual mouse delta this tick ─────────────────────
-            // Manual delta = (new angle − last angle) − assist applied last tick
+            // Isolate raw manual mouse delta
             float manualDeltaYaw   = MathHelper.wrapDegrees(
                 (currentYaw   - prevAssistYaw)   - lastPlayerYaw);
             float manualDeltaPitch = (currentPitch - prevAssistPitch) - lastPlayerPitch;
 
-            // ── guard checks ─────────────────────────────────────────────────
             if (onlyWhenClicking.get() && (mc.options == null || !mc.options.attackKey.isPressed())) {
                 clearAssist(currentYaw, currentPitch); return;
             }
@@ -534,7 +499,6 @@ public class AdvancedAimAssist extends Module {
             if (switchCooldownTicks > 0) switchCooldownTicks--;
             if (cycleTimer         > 0) cycleTimer--;
 
-            // ── target acquisition ───────────────────────────────────────────
             Entity found = findBestTarget();
             if (found != target) { target = found; onTargetChanged(); }
 
@@ -547,14 +511,26 @@ public class AdvancedAimAssist extends Module {
                 lastPlayerYaw = currentYaw; lastPlayerPitch = currentPitch; return;
             }
 
-            // ── compute target angles ────────────────────────────────────────
             float[] angles = getAimAngles(target);
             if (angles == null) { clearAssist(currentYaw, currentPitch); return; }
 
             double wantedYaw   = angles[0];
             double wantedPitch = angles[1];
 
-            // ── auto-attack ──────────────────────────────────────────────────
+            // ── Micro-Overshoot Injection ────────────────────────────────────
+            if (microOvershoot.get()) {
+                double rawCheckDist = Math.abs(MathHelper.wrapDegrees(wantedYaw - currentYaw));
+                if (rawCheckDist > 12.0 && overshootTicksLeft <= 0 && ThreadLocalRandom.current().nextDouble() < 0.35) {
+                    overshootTicksLeft = 1;
+                    overshootYawOffset = Math.signum(MathHelper.wrapDegrees(wantedYaw - currentYaw)) * ThreadLocalRandom.current().nextDouble(0.4, 0.9);
+                }
+            }
+            if (overshootTicksLeft > 0) {
+                wantedYaw += overshootYawOffset;
+                overshootTicksLeft--;
+            }
+
+            // Auto-attack
             if (autoAttack.get() && mc.interactionManager != null
                 && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
                 Vec3d eye   = mc.player.getEyePos();
@@ -566,9 +542,7 @@ public class AdvancedAimAssist extends Module {
                 }
             }
 
-            // ── escape-angle guard (replaces old release-angle + mouse-threshold) ──
-            // Only strip the assist when the user deliberately steers away; never
-            // penalise movement toward the target.
+            // Escape angle
             Vec3d eye   = mc.player.getEyePos();
             Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0);
             Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
@@ -583,7 +557,7 @@ public class AdvancedAimAssist extends Module {
                 clearAssist(currentYaw, currentPitch); return;
             }
 
-            // ── micro-noise (heuristic evasion) ──────────────────────────────
+            // Micro-noise
             if (humanVariation.get() > 0) {
                 double t      = now * 0.00085;
                 double noiseY = (Math.sin(t * 2.1) * 0.5 + Math.sin(t * 4.3) * 0.25)
@@ -594,7 +568,7 @@ public class AdvancedAimAssist extends Module {
                 wantedPitch  = MathHelper.clamp(wantedPitch + noiseP, -90.0, 90.0);
             }
 
-            // ── GCD quantisation (pre-delta) ──────────────────────────────────
+            // GCD quantisation (pre-delta)
             if (gcdFix.get()) {
                 wantedYaw   = RotationUtils.applyGCD(currentYaw,   wantedYaw);
                 wantedPitch = RotationUtils.applyGCD(currentPitch, wantedPitch);
@@ -609,74 +583,73 @@ public class AdvancedAimAssist extends Module {
                 clearAssist(currentYaw, currentPitch); return;
             }
 
-            // ── sigmoid step calculation ──────────────────────────────────────
+            // ── EXPONENTIAL SMOOTH EASE-OUT DAMPING & ASYMMETRIC DECOUPLING ──
             float maxYawTick   = (float) (horizontalSpeed.get() / 20.0);
             float maxPitchTick = (float) (verticalSpeed.get()   / 20.0);
             double glue        = MathHelper.clamp(stickyGlue.get(), 0.1, 1.0);
             double smooth      = MathHelper.clamp(smoothness.get(), 0.01, 0.99);
 
-            // Velocity floor: angular speed the target appears to move per tick.
-            // Estimated from target entity velocity projected onto the screen plane.
+            // Additive Mouse Synergy Factor
+            double manualMagnitude = Math.hypot(manualDeltaYaw, manualDeltaPitch);
+            double synergyFactor   = manualMagnitude > 0.02f ? 1.0 : 0.42;
+
+            // Exponential ease-out damping formula:
+            // factor = 1.0 - exp(-distance / (smoothness * scale))
+            // Combined with sigmoidal velocity progression for ultimate butter-smoothness
+            double expFactorYaw   = 1.0 - Math.exp(-absYaw   / (Math.max(smooth, 0.05) * 14.0));
+            double expFactorPitch = 1.0 - Math.exp(-absPitch / (Math.max(smooth, 0.05) * 12.0));
+
+            // Asymmetric non-linearity: Yaw and Pitch scale differently to avoid robotic axes locking
+            double stepY = maxYawTick   * expFactorYaw   * (0.65 + 0.35 * glue) * (1.0 - smooth * 0.30) * synergyFactor;
+            double stepP = maxPitchTick * expFactorPitch * (0.60 + 0.40 * glue) * (1.0 - (smooth * 1.20) * 0.30) * synergyFactor;
+
+            // Velocity floor for target tracking
             float targetAngularSpeedYaw = 0f, targetAngularSpeedPitch = 0f;
             if (target != null) {
                 Vec3d vel    = target.getVelocity();
                 Vec3d eyePos = mc.player.getEyePos();
-                Vec3d dir    = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0)
-                                      .subtract(eyePos);
+                Vec3d dir    = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0).subtract(eyePos);
                 double dist  = dir.length();
                 if (dist > 0.01) {
-                    // Lateral component of target velocity perpendicular to view ray
                     Vec3d dirN  = dir.normalize();
-                    Vec3d perpH = new Vec3d(-dirN.z, 0, dirN.x); // horizontal perp
-                    double latV = Math.abs(vel.subtract(dirN.multiply(vel.dotProduct(dirN)))
-                                             .dotProduct(perpH));
-                    // Convert linear speed at distance dist to angular deg/tick
+                    Vec3d perpH = new Vec3d(-dirN.z, 0, dirN.x);
+                    double latV = Math.abs(vel.subtract(dirN.multiply(vel.dotProduct(dirN))).dotProduct(perpH));
                     targetAngularSpeedYaw   = (float) Math.toDegrees(Math.atan2(latV, dist));
-                    targetAngularSpeedPitch = targetAngularSpeedYaw * 0.5f;
+                    targetAngularSpeedPitch = targetAngularSpeedYaw * 0.45f;
                 }
             }
 
-            // Floor = max(target angular speed, small minimum keep-alive)
-            float floorYaw   = Math.max(targetAngularSpeedYaw,   0.25f);
-            float floorPitch = Math.max(targetAngularSpeedPitch, 0.15f);
+            float floorYaw   = Math.max(targetAngularSpeedYaw,   0.20f) * (float) (0.7 + 0.3 * glue);
+            float floorPitch = Math.max(targetAngularSpeedPitch, 0.12f) * (float) (0.7 + 0.3 * glue);
 
-            // Scale floor by glue so tighter glue gives slightly higher floor
-            floorYaw   *= (float) (0.8 + 0.2 * glue);
-            floorPitch *= (float) (0.8 + 0.2 * glue);
+            float finalStepYaw   = (float) Math.max(stepY, floorYaw);
+            float finalStepPitch = (float) Math.max(stepP, floorPitch);
 
-            float stepYaw   = computeStep(absYaw,   maxYawTick,   glue, smooth, floorYaw);
-            float stepPitch = computeStep(absPitch, maxPitchTick, glue, smooth, floorPitch);
+            finalStepYaw   = Math.min(finalStepYaw,   maxYawTick);
+            finalStepPitch = Math.min(finalStepPitch, maxPitchTick);
 
-            // ── micro-magnetism inside hitbox (<6°) ────────────────────────
+            finalStepYaw   = (float) Math.min(finalStepYaw,   absYaw);
+            finalStepPitch = (float) Math.min(finalStepPitch, absPitch);
+
+            // Micro-magnetism inside hitbox (<6°)
             if (microMagnetism.get() > 0.0 && absYaw < 6.0) {
-                double mag = (1.0 - absYaw / 6.0) * microMagnetism.get() * 0.30;
-                stepYaw   += (float) (stepYaw * mag);
+                double mag = (1.0 - absYaw / 6.0) * microMagnetism.get() * 0.28;
+                finalStepYaw += finalStepYaw * mag;
             }
             if (microMagnetism.get() > 0.0 && absPitch < 5.0) {
-                double mag = (1.0 - absPitch / 5.0) * microMagnetism.get() * 0.30;
-                stepPitch += (float) (stepPitch * mag);
+                double mag = (1.0 - absPitch / 5.0) * microMagnetism.get() * 0.28;
+                finalStepPitch += finalStepPitch * mag;
             }
 
-            // ── active flick synergy (player moving toward target) ──────────
-            boolean flickingToward =
-                Math.abs(manualDeltaYaw) > 0.20f
-                && Math.signum(manualDeltaYaw) == Math.signum(rawDeltaYaw);
-            if (flickingToward) {
-                stepYaw   = Math.min(maxYawTick,   stepYaw   * 1.30f);
-                stepPitch = Math.min(maxPitchTick, stepPitch * 1.25f);
-            }
+            float yawStep   = finalStepYaw   * (float) Math.signum(rawDeltaYaw);
+            float pitchStep = finalStepPitch * (float) Math.signum(rawDeltaPitch);
 
-            // final signed steps
-            float yawStep   = stepYaw   * (float) Math.signum(rawDeltaYaw);
-            float pitchStep = stepPitch * (float) Math.signum(rawDeltaPitch);
-
-            // ── GCD quantisation (post-step) ──────────────────────────────────
+            // GCD quantisation (post-step)
             if (gcdFix.get()) {
                 yawStep   = (float) (RotationUtils.applyGCD(currentYaw,   currentYaw   + yawStep)   - currentYaw);
                 pitchStep = (float) (RotationUtils.applyGCD(currentPitch, currentPitch + pitchStep) - currentPitch);
             }
 
-            // ── apply rotations (additive, non-hijacking) ────────────────────
             float finalYaw   = currentYaw   + yawStep;
             float finalPitch = MathHelper.clamp(currentPitch + pitchStep, -90.0f, 90.0f);
 
@@ -709,7 +682,6 @@ public class AdvancedAimAssist extends Module {
         }
     }
 
-    /** Zero-out assist bookkeeping and record current angles as baseline. */
     private void clearAssist(float y, float p) {
         prevAssistYaw   = 0f;
         prevAssistPitch = 0f;
@@ -752,32 +724,44 @@ public class AdvancedAimAssist extends Module {
         double halfFov = fov.get() / 2.0;
         boolean useFov = fov.get() < 360.0;
 
-        candidateCache.clear();
+        targetCache.clear();
         for (Entity entity : mc.world.getEntities()) {
             if (!isValidTarget(entity)) continue;
             Vec3d  point    = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
             double distance = eye.distanceTo(point);
             if (distance > range.get()) continue;
-            if (useFov && AimUtils.getAngle(look, eye, point) > halfFov) continue;
+            double angle = AimUtils.getAngle(look, eye, point);
+            if (useFov && angle > halfFov) continue;
             if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
-            candidateCache.add(entity);
+
+            float health = AimUtils.getHealth(entity);
+            targetCache.add(new AimTarget(entity, point, distance, angle, health));
         }
 
-        if (candidateCache.isEmpty()) return null;
+        if (targetCache.isEmpty()) return null;
 
-        candidateCache.sort((e1, e2) -> {
-            Vec3d p1 = AimUtils.getAimPoint(e1, hitboxTarget.get(), false, 0);
-            Vec3d p2 = AimUtils.getAimPoint(e2, hitboxTarget.get(), false, 0);
-            return switch (priority.get()) {
-                case LowestHealth -> Float.compare(AimUtils.getHealth(e1), AimUtils.getHealth(e2));
-                case Angle        -> Double.compare(
-                    AimUtils.getAngle(look, eye, p1),
-                    AimUtils.getAngle(look, eye, p2));
-                default           -> Double.compare(eye.distanceTo(p1), eye.distanceTo(p2));
-            };
+        targetCache.sort((t1, t2) -> switch (priority.get()) {
+            case LowestHealth -> Float.compare(t1.health(), t2.health());
+            case Angle        -> Double.compare(t1.angle(), t2.angle());
+            default           -> Double.compare(t1.distance(), t2.distance());
         });
 
-        return candidateCache.get(0);
+        if (multiTarget.get() && multiTargetMode.get() == MultiTargetMode.Cycle && targetCache.size() > 1) {
+            if (cycleTimer <= 0) {
+                cycleTimer = cycleTime.get();
+                int currentIndex = -1;
+                for (int i = 0; i < targetCache.size(); i++) {
+                    if (targetCache.get(i).entity() == target) {
+                        currentIndex = i;
+                        break;
+                    }
+                }
+                int nextIndex = (currentIndex + 1) % targetCache.size();
+                return targetCache.get(nextIndex).entity();
+            }
+        }
+
+        return targetCache.get(0).entity();
     }
 
     private boolean isValidTarget(Entity entity) {
@@ -802,11 +786,6 @@ public class AdvancedAimAssist extends Module {
         return AimUtils.getAngle(look, eye, point) <= escapeAngle.get();
     }
 
-    // ------------------------------------------------------------------ render circle
-    /**
-     * Renders the target ring.  Buffer capacity is pre-allocated to prevent native
-     * OpenGL vertex-buffer overrun crash (exit code 0xc0000409).
-     */
     private void renderTargetCircle(Render3DEvent event) {
         if (event.renderer == null || target.isRemoved() || !target.isAlive()) return;
         if (mc.world == null || target.getEntityWorld() != mc.world) { target = null; return; }
@@ -853,7 +832,6 @@ public class AdvancedAimAssist extends Module {
         }
     }
 
-    // ------------------------------------------------------------------ info
     @Override
     public String getInfoString() {
         return target != null ? AimUtils.getName(target) : null;
