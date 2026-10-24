@@ -35,7 +35,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * AdvancedAimAssist — DemonClient v2.2 Exponential Smooth Ease-Out Edition
+ * AdvancedAimAssist Exponential Smooth Ease-Out Edition
  *
  * Mathematical Camera Interpolation & Humanized Mouse Movement Architecture:
  *
