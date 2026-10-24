@@ -36,16 +36,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
-/**
- * AdvancedAimAssist (AimBot) - DemonClient v2.2 Crash-Safe & Memory-Hardened Edition
- * Hardened Features:
- * 1. Zero Native Crash 0xc0000409 (GL vertex capacity buffer overrun prevention in renderTargetCircle)
- * 2. Rate-limited clean rotation updates (avoids saturating the Render Thread and matrix buffers)
- * 3. Robust Try-Catch exception isolation in onTick with auto-toggle failsafe
- * 4. Pointer & state clearance on world/server change via GameLeftEvent, GameJoinedEvent, and world validation
- * 5. Strict Additive Pull Assist, Freedom Hitbox Roaming, and Strict Player-Only filtering
- * 6. GCD Sensitivity Grid alignment and NaN/Infinity protocol protection
- */
+
 public class AdvancedAimAssist extends Module {
     private final SettingGroup sgGeneral = settings.createGroup("General");
     private final SettingGroup sgPro = settings.createGroup("Pro Settings");
@@ -901,7 +892,7 @@ public class AdvancedAimAssist extends Module {
      */
     private boolean isValidTarget(Entity entity) {
         if (entity == null || entity == mc.player || entity == mc.getCameraEntity()) return false;
-        
+
         // Strict player check: discard anything that is not a real PlayerEntity immediately
         if (!(entity instanceof PlayerEntity player)) return false;
 
