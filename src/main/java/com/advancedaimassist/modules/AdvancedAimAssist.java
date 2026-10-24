@@ -34,13 +34,14 @@ import java.util.concurrent.ThreadLocalRandom;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * AdvancedAimAssist (AimBot) - DemonClient v2.2 Player-Only Legit Edition
+ * AdvancedAimAssist (AimBot) - DemonClient v2.2 Protocol-Safe Player-Only Edition
  * Features:
- * 1. Strict Player-Only Filtering (Ignores mobs, animals, and non-player entities entirely)
- * 2. Sine Fade-In Target Switch Ramp (Zero hook jerks or micro-jumps on target acquisition)
- * 3. GCD Sub-Pixel Deadzone (Eliminates oscillation/flicker around sensitivity grid boundaries)
- * 4. Strict Additive Pull Assist with Manual Mouse Override Threshold
- * 5. Freedom Hitbox Roaming & Strict Closest Target Selection (Euclidean distance)
+ * 1. Strict Protocol & NaN/Infinite Angle Safety (Zero "Invalid Packet" kicks)
+ * 2. Strict Player-Only Filtering (Ignores mobs, animals, and non-player entities entirely)
+ * 3. Sine Fade-In Target Switch Ramp (Zero hook jerks or micro-jumps on target acquisition)
+ * 4. GCD Sub-Pixel Deadzone (Eliminates oscillation/flicker around sensitivity grid boundaries)
+ * 5. Strict Additive Pull Assist with Manual Mouse Override Threshold
+ * 6. Freedom Hitbox Roaming & Strict Closest Target Selection (Euclidean distance)
  */
 public class AdvancedAimAssist extends Module {
     private final SettingGroup sgGeneral = settings.createGroup("General");
@@ -64,7 +65,7 @@ public class AdvancedAimAssist extends Module {
         Cycle
     }
 
-    // General Settings (Ultra-Legit AntiCheat-Safe Defaults)
+    // General Settings (Protocol-Safe AntiCheat-Safe Defaults)
     private final Setting<AimMode> aimMode = sgGeneral.add(new EnumSetting.Builder<AimMode>()
         .name("aim-mode")
         .description("Client: additive pull assist. Assist: smooth humanized. Silent: server rotations only.")
@@ -263,7 +264,7 @@ public class AdvancedAimAssist extends Module {
     private final Setting<AimPart> hitboxTarget = sgTargeting.add(new EnumSetting.Builder<AimPart>()
         .name("hitbox-target")
         .description("Hitbox target zone.")
-        .defaultValue(AimPart.Random)
+        .defaultValue(AimPart.Head)
         .build()
     );
 
@@ -454,7 +455,7 @@ public class AdvancedAimAssist extends Module {
     private final List<Entity> candidateCache = new ArrayList<>();
 
     public AdvancedAimAssist() {
-        super(Categories.Combat, "advanced-aim-assist", "DemonClient v2.2 Player-Only Legit Edition.");
+        super(Categories.Combat, "advanced-aim-assist", "DemonClient v2.2 Protocol-Safe Player-Only Edition.");
     }
 
     @Override
@@ -512,6 +513,12 @@ public class AdvancedAimAssist extends Module {
         }
         float yaw = (float) AimUtils.getYaw(eye, point);
         float pitch = (float) MathHelper.clamp(AimUtils.getPitch(eye, point), -90.0, 90.0);
+
+        // Protocol Safety Check: Prevent NaN or Infinite angles from generating invalid packets
+        if (Float.isNaN(yaw) || Float.isInfinite(yaw) || Float.isNaN(pitch) || Float.isInfinite(pitch)) {
+            return null;
+        }
+
         return new float[]{yaw, pitch};
     }
 
@@ -519,6 +526,14 @@ public class AdvancedAimAssist extends Module {
     private void onTick(TickEvent.Post event) {
         if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
             target = null;
+            return;
+        }
+
+        // Protocol Safety Check: Validate current player view angles
+        if (Float.isNaN(mc.player.getYaw()) || Float.isInfinite(mc.player.getYaw()) ||
+            Float.isNaN(mc.player.getPitch()) || Float.isInfinite(mc.player.getPitch())) {
+            mc.player.setYaw(0f);
+            mc.player.setPitch(0f);
             return;
         }
 
@@ -682,7 +697,7 @@ public class AdvancedAimAssist extends Module {
             stepYaw *= (float) (1.0 + microMagnetism.get() * 0.1);
         }
 
-        // Additive Pull Assist Application (Ultra-Legit Mouse Collaboration)
+        // === PROTOCOL-SAFE ADDITIVE PULL ASSIST APPLICATION (Zero Invalid Packet Kicks) ===
         if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
             float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
             float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
@@ -692,14 +707,25 @@ public class AdvancedAimAssist extends Module {
                 pitchStep = (float) (RotationUtils.applyGCD(mc.player.getPitch(), mc.player.getPitch() + pitchStep) - mc.player.getPitch());
             }
 
-            mc.player.setYaw(mc.player.getYaw() + yawStep);
-            mc.player.setPitch(MathHelper.clamp(mc.player.getPitch() + pitchStep, -90.0f, 90.0f));
+            float finalYaw = mc.player.getYaw() + yawStep;
+            float finalPitch = MathHelper.clamp(mc.player.getPitch() + pitchStep, -90.0f, 90.0f);
+
+            // Strict Protocol Validation: Reject NaN or Infinite values before updating client view
+            if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
+                !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
+                mc.player.setYaw(finalYaw);
+                mc.player.setPitch(finalPitch);
+            }
         } else {
             float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
             float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
             float finalYaw = (float) Rotations.serverYaw + yawStep;
             float finalPitch = MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90.0f, 90.0f);
-            Rotations.rotate(finalYaw, finalPitch);
+
+            if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
+                !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
+                Rotations.rotate(finalYaw, finalPitch);
+            }
         }
 
         lastPlayerYaw = mc.player.getYaw();
@@ -746,14 +772,14 @@ public class AdvancedAimAssist extends Module {
         for (Entity entity : mc.world.getEntities()) {
             if (!isValidTarget(entity)) continue;
 
-            Vec3d point = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+            Vec3d point = AimUtils.getAimPoint(entity, hitboxTarget.get(), prediction.get(), predictionTicks.get());
             double distance = eye.distanceTo(point);
             if (distance > range.get()) continue;
 
             double angle = AimUtils.getAngle(look, eye, point);
             if (useFov && angle > halfFov) continue;
 
-            if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
+            if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point)) continue;
 
             candidateCache.add(entity);
         }
@@ -806,7 +832,7 @@ public class AdvancedAimAssist extends Module {
         double effectiveUnlockRange = Math.max(unlockRange.get(), range.get() + 0.5);
 
         if (eye.distanceTo(point) > effectiveUnlockRange) return false;
-        if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) return false;
+        if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point)) return false;
         return true;
     }
 
