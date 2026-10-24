@@ -471,7 +471,7 @@ public class AdvancedAimAssist extends Module {
         reactionReadyAt = 0;
         switchCooldownTicks = 0;
         cycleTimer = 0;
-        targetSwitchProgressTicks = 15;
+        targetSwitchProgressTicks = 6;
         previousStepYaw = 0f;
         previousStepPitch = 0f;
         candidateCache.clear();
@@ -622,7 +622,7 @@ public class AdvancedAimAssist extends Module {
 
             if (switchCooldownTicks > 0) switchCooldownTicks--;
             if (cycleTimer > 0) cycleTimer--;
-            if (targetSwitchProgressTicks < 15) targetSwitchProgressTicks++;
+            if (targetSwitchProgressTicks < 6) targetSwitchProgressTicks++;
 
             Entity found = findBestTarget();
             if (found != target) {
@@ -696,18 +696,18 @@ public class AdvancedAimAssist extends Module {
             double rawDeltaYaw = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
             double rawDeltaPitch = targetPitch - mc.player.getPitch();
 
-            // GCD Sub-Pixel Deadzone to eliminate flicker/oscillation
+            // GCD Sub-Pixel Deadzone to eliminate flicker without killing fine tracking
             if (gcdFix.get() && mc.options != null) {
                 float sensitivity = (float) (mc.options.getMouseSensitivity().getValue() * 0.6 + 0.2);
                 double gcd = sensitivity * sensitivity * sensitivity * 1.2;
-                if (Math.abs(rawDeltaYaw) < gcd * 0.5) rawDeltaYaw = 0.0;
-                if (Math.abs(rawDeltaPitch) < gcd * 0.5) rawDeltaPitch = 0.0;
+                if (Math.abs(rawDeltaYaw) < gcd * 0.2) rawDeltaYaw = 0.0;
+                if (Math.abs(rawDeltaPitch) < gcd * 0.2) rawDeltaPitch = 0.0;
             }
 
             double absYaw = Math.abs(rawDeltaYaw);
             double absPitch = Math.abs(rawDeltaPitch);
 
-            if (absYaw == 0.0 && absPitch == 0.0) {
+            if (absYaw < 0.001 && absPitch < 0.001) {
                 previousStepYaw = 0f;
                 previousStepPitch = 0f;
                 lastPlayerYaw = mc.player.getYaw();
@@ -718,39 +718,54 @@ public class AdvancedAimAssist extends Module {
             float baseStepH = (float) (horizontalSpeed.get() / 20.0);
             float baseStepV = (float) (verticalSpeed.get() / 20.0);
 
-            // Deep Ease-Out Curve for Anti-Cheat Heuristic Evasion
-            double adaptSmooth = smoothness.get();
-            double easeYaw = Math.pow(MathHelper.clamp(absYaw / 45.0, 0.04, 1.0), 1.3 + adaptSmooth * 1.5);
-            double easePitch = Math.pow(MathHelper.clamp(absPitch / 30.0, 0.04, 1.0), 1.3 + adaptSmooth * 1.5);
+            // === DEMONCLIENT v2.2 ELASTIC STICKY GLUE CALIBRATION ===
+            double glue = MathHelper.clamp(stickyGlue.get(), 0.1, 1.0);
+            double smooth = MathHelper.clamp(smoothness.get(), 0.01, 0.99);
 
-            float rawStepYaw = (float) (baseStepH * easeYaw * stickyGlue.get());
-            float rawStepPitch = (float) (baseStepV * easePitch * stickyGlue.get());
+            // Proportional attraction: scales directly with enemy displacement for instant adherence
+            double propYaw = absYaw * (0.22 + 0.38 * glue);
+            double propPitch = absPitch * (0.20 + 0.35 * glue);
 
-            // Target Switch Progressive Sine Fade-In Ramp (Zero Hook Jerks & Micro-Jumps)
-            float switchRamp = (float) Math.sin((Math.min(15.0f, targetSwitchProgressTicks) / 15.0f) * (Math.PI / 2.0));
+            // Eased base speed component using sine interpolation (maintains healthy pull at all angles)
+            double easeYaw = Math.sin(MathHelper.clamp(absYaw / 40.0, 0.08, 1.0) * (Math.PI / 2.0));
+            double easePitch = Math.sin(MathHelper.clamp(absPitch / 25.0, 0.08, 1.0) * (Math.PI / 2.0));
+
+            float rawStepYaw = (float) (propYaw + baseStepH * easeYaw * glue * 0.55);
+            float rawStepPitch = (float) (propPitch + baseStepV * easePitch * glue * 0.55);
+
+            // Target Switch Progressive Sine Fade-In (40% initial grip, reaches 100% in 6 ticks)
+            float rampProgress = Math.min(6, targetSwitchProgressTicks) / 6.0f;
+            float switchRamp = 0.40f + 0.60f * (float) Math.sin(rampProgress * (Math.PI / 2.0));
             rawStepYaw *= switchRamp;
             rawStepPitch *= switchRamp;
 
-            // Gentle Minimum Step (Zero Freezing, Ultra-Smooth)
-            float minStepYaw = Math.max(0.4f, (float)(absYaw * 0.28));
-            float minStepPitch = Math.max(0.4f, (float)(absPitch * 0.28));
+            // Micro-Magnetism: reinforces glue tracking when crosshair nears target center
+            if (microMagnetism.get() > 0 && absYaw < 14.0) {
+                double magnetFactor = (1.0 - (absYaw / 14.0)) * microMagnetism.get() * 0.5;
+                rawStepYaw *= (float) (1.0 + magnetFactor);
+            }
+            if (microMagnetism.get() > 0 && absPitch < 12.0) {
+                double magnetFactor = (1.0 - (absPitch / 12.0)) * microMagnetism.get() * 0.5;
+                rawStepPitch *= (float) (1.0 + magnetFactor);
+            }
+
+            // Minimum active step: guarantees immediate tracking response against strafing
+            float minStepYaw = (float) Math.max(0.4, absYaw * 0.20 * glue);
+            float minStepPitch = (float) Math.max(0.3, absPitch * 0.20 * glue);
             rawStepYaw = Math.max(minStepYaw, rawStepYaw);
             rawStepPitch = Math.max(minStepPitch, rawStepPitch);
 
-            // Heavy Natural Momentum (28% Carry-Through Inertia for Soft, Organic Feel)
-            float stepYaw = previousStepYaw * 0.28f + rawStepYaw * 0.72f;
-            float stepPitch = previousStepPitch * 0.28f + rawStepPitch * 0.72f;
+            // Dynamic Inertia Smoothing (preserves fluid human momentum without feeling sluggish)
+            float inertia = (float) (0.12 + smooth * 0.22); // ~0.28 inertia with smooth=0.72
+            float stepYaw = previousStepYaw * inertia + rawStepYaw * (1.0f - inertia);
+            float stepPitch = previousStepPitch * inertia + rawStepPitch * (1.0f - inertia);
             previousStepYaw = stepYaw;
             previousStepPitch = stepPitch;
 
-            // Strict Anti-Cheat Safe Max Absolute Speed Ceiling (18.0 per tick)
+            // Strict Anti-Cheat Safe Max Absolute Speed Ceiling
             float maxAbs = maxAbsoluteSpeed.get().floatValue();
             stepYaw = Math.min(maxAbs, Math.max(0.05f, stepYaw));
             stepPitch = Math.min(maxAbs, Math.max(0.05f, stepPitch));
-
-            if (microMagnetism.get() > 0 && absYaw < 9.0) {
-                stepYaw *= (float) (1.0 + microMagnetism.get() * 0.1);
-            }
 
             // === PROTOCOL-SAFE ADDITIVE PULL ASSIST APPLICATION ===
             if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
