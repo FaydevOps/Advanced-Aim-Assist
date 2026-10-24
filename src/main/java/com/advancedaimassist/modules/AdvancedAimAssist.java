@@ -35,7 +35,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 
-
 public class AdvancedAimAssist extends Module {
 
     // ------------------------------------------------------------------ groups
