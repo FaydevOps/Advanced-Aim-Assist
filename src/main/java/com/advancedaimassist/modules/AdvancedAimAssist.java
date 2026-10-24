@@ -5,6 +5,8 @@ import com.advancedaimassist.utils.AimTarget;
 import com.advancedaimassist.utils.AimUtils;
 import com.advancedaimassist.utils.RotationUtils;
 import com.advancedaimassist.utils.TargetPriority;
+import meteordevelopment.meteorclient.events.game.GameJoinedEvent;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -24,6 +26,7 @@ import net.minecraft.item.Item;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -33,15 +36,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
-/**
- * AdvancedAimAssist (AimBot) - DemonClient v2.2 Protocol-Safe Player-Only Edition
- * Features:
- * 1. Strict Protocol & NaN/Infinite Angle Safety (Zero "Invalid Packet" kicks)
- * 2. Strict Player-Only Filtering (Ignores mobs, animals, and non-player entities entirely)
- * 3. Sine Fade-In Target Switch Ramp (Zero hook jerks or micro-jumps on target acquisition)
- * 4. GCD Sub-Pixel Deadzone (Eliminates oscillation/flicker around sensitivity grid boundaries)
- * 5. Strict Additive Pull Assist with Manual Mouse Override Threshold
- */
+
 public class AdvancedAimAssist extends Module {
     private final SettingGroup sgGeneral = settings.createGroup("General");
     private final SettingGroup sgPro = settings.createGroup("Pro Settings");
@@ -441,7 +436,7 @@ public class AdvancedAimAssist extends Module {
         .build()
     );
 
-    // State Variables
+    // State Variables & Caches
     private Entity target;
     private long reactionReadyAt;
     private int switchCooldownTicks;
@@ -451,31 +446,61 @@ public class AdvancedAimAssist extends Module {
     private int targetSwitchProgressTicks = 0;
     private float lastPlayerYaw = 0f;
     private float lastPlayerPitch = 0f;
+    private long lastTickTime = 0L;
+    private World lastWorld = null;
     private final List<Entity> candidateCache = new ArrayList<>();
 
     public AdvancedAimAssist() {
-        super(Categories.Combat, "advanced-aim-assist", "DemonClient v2.2 Protocol-Safe Player-Only Edition.");
+        super(Categories.Combat, "advanced-aim-assist", "DemonClient v2.2 Crash-Safe & Memory-Hardened Edition.");
     }
 
-    @Override
-    public void onActivate() {
+    /**
+     * Resets all internal targeting and momentum state cleanly.
+     */
+    private void resetState() {
         target = null;
         reactionReadyAt = 0;
         switchCooldownTicks = 0;
         cycleTimer = 0;
-        targetSwitchProgressTicks = 15;
+        targetSwitchProgressTicks = 6;
         previousStepYaw = 0f;
         previousStepPitch = 0f;
+        candidateCache.clear();
         if (mc.player != null) {
             lastPlayerYaw = mc.player.getYaw();
             lastPlayerPitch = mc.player.getPitch();
+        } else {
+            lastPlayerYaw = 0f;
+            lastPlayerPitch = 0f;
+        }
+    }
+
+    @Override
+    public void onActivate() {
+        resetState();
+        if (mc.world != null) {
+            lastWorld = mc.world;
         }
     }
 
     @Override
     public void onDeactivate() {
-        target = null;
-        candidateCache.clear();
+        resetState();
+        lastWorld = null;
+    }
+
+    @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        resetState();
+        lastWorld = null;
+    }
+
+    @EventHandler
+    private void onGameJoined(GameJoinedEvent event) {
+        resetState();
+        if (mc.world != null) {
+            lastWorld = mc.world;
+        }
     }
 
     private boolean isHoldingWeapon() {
@@ -498,13 +523,15 @@ public class AdvancedAimAssist extends Module {
         // Freedom Hitbox Roaming: Allows organic cursor navigation and wandering inside the enemy BoundingBox
         if (hitboxRoaming.get() > 0.0) {
             Box box = targetEntity.getBoundingBox();
-            double width = box.maxX - box.minX;
-            double height = box.maxY - box.minY;
-            double time = System.currentTimeMillis() * 0.002;
-            double offsetX = Math.sin(time * 2.1) * (width * 0.35) * hitboxRoaming.get();
-            double offsetZ = Math.cos(time * 1.7) * (width * 0.35) * hitboxRoaming.get();
-            double offsetY = Math.sin(time * 2.8) * (height * 0.2) * hitboxRoaming.get();
-            point = point.add(offsetX, offsetY, offsetZ);
+            if (box != null) {
+                double width = box.maxX - box.minX;
+                double height = box.maxY - box.minY;
+                double time = System.currentTimeMillis() * 0.002;
+                double offsetX = Math.sin(time * 2.1) * (width * 0.35) * hitboxRoaming.get();
+                double offsetZ = Math.cos(time * 1.7) * (width * 0.35) * hitboxRoaming.get();
+                double offsetY = Math.sin(time * 2.8) * (height * 0.2) * hitboxRoaming.get();
+                point = point.add(offsetX, offsetY, offsetZ);
+            }
         }
 
         if (strafeCompensation.get() && targetEntity instanceof LivingEntity living) {
@@ -523,220 +550,274 @@ public class AdvancedAimAssist extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
-            target = null;
-            return;
-        }
-
-        // Protocol Safety Check: Validate current player view angles
-        if (Float.isNaN(mc.player.getYaw()) || Float.isInfinite(mc.player.getYaw()) ||
-            Float.isNaN(mc.player.getPitch()) || Float.isInfinite(mc.player.getPitch())) {
-            mc.player.setYaw(0f);
-            mc.player.setPitch(0f);
-            return;
-        }
-
-        // Manual Mouse Override Check using mouseThreshold
-        float currentYaw = mc.player.getYaw();
-        float currentPitch = mc.player.getPitch();
-        if (mouseThreshold.get() > 0.0) {
-            float playerDeltaYaw = Math.abs(MathHelper.wrapDegrees(currentYaw - lastPlayerYaw));
-            float playerDeltaPitch = Math.abs(currentPitch - lastPlayerPitch);
-            if (playerDeltaYaw > mouseThreshold.get() + Math.abs(previousStepYaw) ||
-                playerDeltaPitch > mouseThreshold.get() + Math.abs(previousStepPitch)) {
-                lastPlayerYaw = currentYaw;
-                lastPlayerPitch = currentPitch;
+        try {
+            if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
+                resetState();
                 return;
             }
-        }
 
-        if (onlyWhenClicking.get() && !mc.options.attackKey.isPressed()) {
-            target = null;
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-
-        if (weaponOnly.get() && !isHoldingWeapon()) {
-            target = null;
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-
-        if (switchCooldownTicks > 0) switchCooldownTicks--;
-        if (cycleTimer > 0) cycleTimer--;
-        if (targetSwitchProgressTicks < 15) targetSwitchProgressTicks++;
-
-        Entity found = findBestTarget();
-        if (found != target) {
-            target = found;
-            onTargetChanged();
-        }
-
-        if (target == null) {
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-
-        if (realisticTiming.get() && System.currentTimeMillis() < reactionReadyAt) {
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-
-        if (requireAttackCooldown.get() && mc.player.getAttackCooldownProgress(0.5f) < 1.0f) {
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-
-        float[] targetAngles = getAimAngles(target);
-        if (targetAngles == null) {
-            lastPlayerYaw = currentYaw;
-            lastPlayerPitch = currentPitch;
-            return;
-        }
-        double targetYaw = targetAngles[0];
-        double targetPitch = targetAngles[1];
-
-        Vec3d eye = mc.player.getEyePos();
-        Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), prediction.get(), predictionTicks.get());
-
-        if (autoAttack.get() && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
-            Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
-            if (AimUtils.getAngle(look, eye, point) < 5.0) {
-                mc.interactionManager.attackEntity(mc.player, target);
-                mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+            // World change / dimension transfer detection
+            if (mc.world != lastWorld) {
+                lastWorld = mc.world;
+                resetState();
+                return;
             }
-        }
 
-        if (releaseAngle.get() < 180.0) {
-            Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
-            if (AimUtils.getAngle(look, eye, point) > releaseAngle.get()) {
+            // Rate limiter: prevent redundant high-frequency rotation computations that saturate render matrix buffers
+            long now = System.currentTimeMillis();
+            if (now - lastTickTime < 10L) {
+                return;
+            }
+            lastTickTime = now;
+
+            // Target validity check (entity dead, despawned, removed or world changed)
+            if (target != null && (target.isRemoved() || !target.isAlive() || target.getEntityWorld() != mc.world)) {
+                target = null;
+            }
+
+            // Protocol Safety Check: Validate current player view angles
+            if (Float.isNaN(mc.player.getYaw()) || Float.isInfinite(mc.player.getYaw()) ||
+                Float.isNaN(mc.player.getPitch()) || Float.isInfinite(mc.player.getPitch())) {
+                mc.player.setYaw(0f);
+                mc.player.setPitch(0f);
+                return;
+            }
+
+            // Manual Mouse Override Check using mouseThreshold
+            float currentYaw = mc.player.getYaw();
+            float currentPitch = mc.player.getPitch();
+            if (mouseThreshold.get() > 0.0) {
+                float playerDeltaYaw = Math.abs(MathHelper.wrapDegrees(currentYaw - lastPlayerYaw));
+                float playerDeltaPitch = Math.abs(currentPitch - lastPlayerPitch);
+                if (playerDeltaYaw > mouseThreshold.get() + Math.abs(previousStepYaw) ||
+                    playerDeltaPitch > mouseThreshold.get() + Math.abs(previousStepPitch)) {
+                    lastPlayerYaw = currentYaw;
+                    lastPlayerPitch = currentPitch;
+                    return;
+                }
+            }
+
+            if (onlyWhenClicking.get() && (mc.options == null || !mc.options.attackKey.isPressed())) {
                 target = null;
                 lastPlayerYaw = currentYaw;
                 lastPlayerPitch = currentPitch;
                 return;
             }
-        }
 
-        // === Ultra-Subtle Micro-Noise (Heuristic Evasion) ===
-        if (humanVariation.get() > 0) {
-            double time = System.currentTimeMillis() * 0.0008;
-            double noiseYaw = (Math.sin(time * 2.1) * 0.5 + Math.sin(time * 4.3) * 0.25) * humanVariation.get() * 0.35;
-            double noisePitch = (Math.cos(time * 2.5) * 0.4 + Math.sin(time * 5.1) * 0.2) * humanVariation.get() * 0.25;
-            targetYaw += noiseYaw;
-            targetPitch = MathHelper.clamp(targetPitch + noisePitch, -90.0, 90.0);
-        }
+            if (weaponOnly.get() && !isHoldingWeapon()) {
+                target = null;
+                lastPlayerYaw = currentYaw;
+                lastPlayerPitch = currentPitch;
+                return;
+            }
 
-        // === GCD Fix & Sub-Pixel Deadzone (Grim & Vulcan Sensitivity Grid Bypass) ===
-        if (gcdFix.get()) {
-            targetYaw = RotationUtils.applyGCD(mc.player.getYaw(), targetYaw);
-            targetPitch = RotationUtils.applyGCD(mc.player.getPitch(), targetPitch);
-        }
+            if (switchCooldownTicks > 0) switchCooldownTicks--;
+            if (cycleTimer > 0) cycleTimer--;
+            if (targetSwitchProgressTicks < 6) targetSwitchProgressTicks++;
 
-        double rawDeltaYaw = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
-        double rawDeltaPitch = targetPitch - mc.player.getPitch();
+            Entity found = findBestTarget();
+            if (found != target) {
+                target = found;
+                onTargetChanged();
+            }
 
-        // GCD Sub-Pixel Deadzone to eliminate flicker/oscillation
-        if (gcdFix.get() && mc.options != null) {
-            float sensitivity = (float) (mc.options.getMouseSensitivity().getValue() * 0.6 + 0.2);
-            double gcd = sensitivity * sensitivity * sensitivity * 1.2;
-            if (Math.abs(rawDeltaYaw) < gcd * 0.5) rawDeltaYaw = 0.0;
-            if (Math.abs(rawDeltaPitch) < gcd * 0.5) rawDeltaPitch = 0.0;
-        }
+            if (target == null) {
+                lastPlayerYaw = currentYaw;
+                lastPlayerPitch = currentPitch;
+                return;
+            }
 
-        double absYaw = Math.abs(rawDeltaYaw);
-        double absPitch = Math.abs(rawDeltaPitch);
+            if (realisticTiming.get() && System.currentTimeMillis() < reactionReadyAt) {
+                lastPlayerYaw = currentYaw;
+                lastPlayerPitch = currentPitch;
+                return;
+            }
 
-        if (absYaw == 0.0 && absPitch == 0.0) {
-            previousStepYaw = 0f;
-            previousStepPitch = 0f;
+            if (requireAttackCooldown.get() && mc.player.getAttackCooldownProgress(0.5f) < 1.0f) {
+                lastPlayerYaw = currentYaw;
+                lastPlayerPitch = currentPitch;
+                return;
+            }
+
+            float[] targetAngles = getAimAngles(target);
+            if (targetAngles == null) {
+                lastPlayerYaw = currentYaw;
+                lastPlayerPitch = currentPitch;
+                return;
+            }
+            double targetYaw = targetAngles[0];
+            double targetPitch = targetAngles[1];
+
+            Vec3d eye = mc.player.getEyePos();
+            Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), prediction.get(), predictionTicks.get());
+
+            if (autoAttack.get() && mc.interactionManager != null && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
+                Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
+                if (AimUtils.getAngle(look, eye, point) < 5.0) {
+                    mc.interactionManager.attackEntity(mc.player, target);
+                    mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                }
+            }
+
+            if (releaseAngle.get() < 180.0) {
+                Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
+                if (AimUtils.getAngle(look, eye, point) > releaseAngle.get()) {
+                    target = null;
+                    lastPlayerYaw = currentYaw;
+                    lastPlayerPitch = currentPitch;
+                    return;
+                }
+            }
+
+            // === Ultra-Subtle Micro-Noise (Heuristic Evasion) ===
+            if (humanVariation.get() > 0) {
+                double time = System.currentTimeMillis() * 0.0008;
+                double noiseYaw = (Math.sin(time * 2.1) * 0.5 + Math.sin(time * 4.3) * 0.25) * humanVariation.get() * 0.35;
+                double noisePitch = (Math.cos(time * 2.5) * 0.4 + Math.sin(time * 5.1) * 0.2) * humanVariation.get() * 0.25;
+                targetYaw += noiseYaw;
+                targetPitch = MathHelper.clamp(targetPitch + noisePitch, -90.0, 90.0);
+            }
+
+            // === GCD Fix & Sub-Pixel Deadzone (Grim & Vulcan Sensitivity Grid Bypass) ===
+            if (gcdFix.get()) {
+                targetYaw = RotationUtils.applyGCD(mc.player.getYaw(), targetYaw);
+                targetPitch = RotationUtils.applyGCD(mc.player.getPitch(), targetPitch);
+            }
+
+            double rawDeltaYaw = MathHelper.wrapDegrees(targetYaw - mc.player.getYaw());
+            double rawDeltaPitch = targetPitch - mc.player.getPitch();
+
+            // GCD Sub-Pixel Deadzone to eliminate flicker without killing fine tracking
+            if (gcdFix.get() && mc.options != null) {
+                float sensitivity = (float) (mc.options.getMouseSensitivity().getValue() * 0.6 + 0.2);
+                double gcd = sensitivity * sensitivity * sensitivity * 1.2;
+                if (Math.abs(rawDeltaYaw) < gcd * 0.2) rawDeltaYaw = 0.0;
+                if (Math.abs(rawDeltaPitch) < gcd * 0.2) rawDeltaPitch = 0.0;
+            }
+
+            double absYaw = Math.abs(rawDeltaYaw);
+            double absPitch = Math.abs(rawDeltaPitch);
+
+            if (absYaw < 0.001 && absPitch < 0.001) {
+                previousStepYaw = 0f;
+                previousStepPitch = 0f;
+                lastPlayerYaw = mc.player.getYaw();
+                lastPlayerPitch = mc.player.getPitch();
+                return;
+            }
+
+            float baseStepH = (float) (horizontalSpeed.get() / 20.0);
+            float baseStepV = (float) (verticalSpeed.get() / 20.0);
+
+            // === DEMONCLIENT v2.2 ELASTIC STICKY GLUE CALIBRATION ===
+            double glue = MathHelper.clamp(stickyGlue.get(), 0.1, 1.0);
+            double smooth = MathHelper.clamp(smoothness.get(), 0.01, 0.99);
+
+            // Proportional attraction: scales directly with enemy displacement for instant adherence
+            double propYaw = absYaw * (0.22 + 0.38 * glue);
+            double propPitch = absPitch * (0.20 + 0.35 * glue);
+
+            // Eased base speed component using sine interpolation (maintains healthy pull at all angles)
+            double easeYaw = Math.sin(MathHelper.clamp(absYaw / 40.0, 0.08, 1.0) * (Math.PI / 2.0));
+            double easePitch = Math.sin(MathHelper.clamp(absPitch / 25.0, 0.08, 1.0) * (Math.PI / 2.0));
+
+            float rawStepYaw = (float) (propYaw + baseStepH * easeYaw * glue * 0.55);
+            float rawStepPitch = (float) (propPitch + baseStepV * easePitch * glue * 0.55);
+
+            // Target Switch Progressive Sine Fade-In (40% initial grip, reaches 100% in 6 ticks)
+            float rampProgress = Math.min(6, targetSwitchProgressTicks) / 6.0f;
+            float switchRamp = 0.40f + 0.60f * (float) Math.sin(rampProgress * (Math.PI / 2.0));
+            rawStepYaw *= switchRamp;
+            rawStepPitch *= switchRamp;
+
+            // Micro-Magnetism: reinforces glue tracking when crosshair nears target center
+            if (microMagnetism.get() > 0 && absYaw < 14.0) {
+                double magnetFactor = (1.0 - (absYaw / 14.0)) * microMagnetism.get() * 0.5;
+                rawStepYaw *= (float) (1.0 + magnetFactor);
+            }
+            if (microMagnetism.get() > 0 && absPitch < 12.0) {
+                double magnetFactor = (1.0 - (absPitch / 12.0)) * microMagnetism.get() * 0.5;
+                rawStepPitch *= (float) (1.0 + magnetFactor);
+            }
+
+            // Minimum active step: guarantees immediate tracking response against strafing
+            float minStepYaw = (float) Math.max(0.4, absYaw * 0.20 * glue);
+            float minStepPitch = (float) Math.max(0.3, absPitch * 0.20 * glue);
+            rawStepYaw = Math.max(minStepYaw, rawStepYaw);
+            rawStepPitch = Math.max(minStepPitch, rawStepPitch);
+
+            // Dynamic Inertia Smoothing (preserves fluid human momentum without feeling sluggish)
+            float inertia = (float) (0.12 + smooth * 0.22); // ~0.28 inertia with smooth=0.72
+            float stepYaw = previousStepYaw * inertia + rawStepYaw * (1.0f - inertia);
+            float stepPitch = previousStepPitch * inertia + rawStepPitch * (1.0f - inertia);
+            previousStepYaw = stepYaw;
+            previousStepPitch = stepPitch;
+
+            // Strict Anti-Cheat Safe Max Absolute Speed Ceiling
+            float maxAbs = maxAbsoluteSpeed.get().floatValue();
+            stepYaw = Math.min(maxAbs, Math.max(0.05f, stepYaw));
+            stepPitch = Math.min(maxAbs, Math.max(0.05f, stepPitch));
+
+            // === PROTOCOL-SAFE ADDITIVE PULL ASSIST APPLICATION ===
+            if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
+                float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
+                float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
+
+                if (gcdFix.get()) {
+                    yawStep = (float) (RotationUtils.applyGCD(mc.player.getYaw(), mc.player.getYaw() + yawStep) - mc.player.getYaw());
+                    pitchStep = (float) (RotationUtils.applyGCD(mc.player.getPitch(), mc.player.getPitch() + pitchStep) - mc.player.getPitch());
+                }
+
+                float finalYaw = mc.player.getYaw() + yawStep;
+                float finalPitch = MathHelper.clamp(mc.player.getPitch() + pitchStep, -90.0f, 90.0f);
+
+                // Strict Protocol Validation & Threshold Guard
+                if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
+                    !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
+                    if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
+                        mc.player.setYaw(finalYaw);
+                        mc.player.setPitch(finalPitch);
+                    }
+                }
+            } else {
+                float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
+                float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
+                float finalYaw = (float) Rotations.serverYaw + yawStep;
+                float finalPitch = MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90.0f, 90.0f);
+
+                if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
+                    !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
+                    if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
+                        Rotations.rotate(finalYaw, finalPitch);
+                    }
+                }
+            }
+
             lastPlayerYaw = mc.player.getYaw();
             lastPlayerPitch = mc.player.getPitch();
-            return;
-        }
-
-        float baseStepH = (float) (horizontalSpeed.get() / 20.0);
-        float baseStepV = (float) (verticalSpeed.get() / 20.0);
-
-        // Deep Ease-Out Curve for Anti-Cheat Heuristic Evasion
-        double adaptSmooth = smoothness.get(); // 0.72
-        double easeYaw = Math.pow(MathHelper.clamp(absYaw / 45.0, 0.04, 1.0), 1.3 + adaptSmooth * 1.5);
-        double easePitch = Math.pow(MathHelper.clamp(absPitch / 30.0, 0.04, 1.0), 1.3 + adaptSmooth * 1.5);
-
-        float rawStepYaw = (float) (baseStepH * easeYaw * stickyGlue.get());
-        float rawStepPitch = (float) (baseStepV * easePitch * stickyGlue.get());
-
-        // Target Switch Progressive Sine Fade-In Ramp (Zero Hook Jerks & Micro-Jumps)
-        float switchRamp = (float) Math.sin((Math.min(15.0f, targetSwitchProgressTicks) / 15.0f) * (Math.PI / 2.0));
-        rawStepYaw *= switchRamp;
-        rawStepPitch *= switchRamp;
-
-        // Gentle Minimum Step (Zero Freezing, Ultra-Smooth)
-        float minStepYaw = Math.max(0.4f, (float)(absYaw * 0.28));
-        float minStepPitch = Math.max(0.4f, (float)(absPitch * 0.28));
-        rawStepYaw = Math.max(minStepYaw, rawStepYaw);
-        rawStepPitch = Math.max(minStepPitch, rawStepPitch);
-
-        // Heavy Natural Momentum (28% Carry-Through Inertia for Soft, Organic Feel)
-        float stepYaw = previousStepYaw * 0.28f + rawStepYaw * 0.72f;
-        float stepPitch = previousStepPitch * 0.28f + rawStepPitch * 0.72f;
-        previousStepYaw = stepYaw;
-        previousStepPitch = stepPitch;
-
-        // Strict Anti-Cheat Safe Max Absolute Speed Ceiling (18.0 per tick)
-        float maxAbs = maxAbsoluteSpeed.get().floatValue();
-        stepYaw = Math.min(maxAbs, Math.max(0.05f, stepYaw));
-        stepPitch = Math.min(maxAbs, Math.max(0.05f, stepPitch));
-
-        if (microMagnetism.get() > 0 && absYaw < 9.0) {
-            stepYaw *= (float) (1.0 + microMagnetism.get() * 0.1);
-        }
-
-        // === PROTOCOL-SAFE ADDITIVE PULL ASSIST APPLICATION (Zero Invalid Packet Kicks) ===
-        if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
-            float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
-            float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
-
-            if (gcdFix.get()) {
-                yawStep = (float) (RotationUtils.applyGCD(mc.player.getYaw(), mc.player.getYaw() + yawStep) - mc.player.getYaw());
-                pitchStep = (float) (RotationUtils.applyGCD(mc.player.getPitch(), mc.player.getPitch() + pitchStep) - mc.player.getPitch());
-            }
-
-            float finalYaw = mc.player.getYaw() + yawStep;
-            float finalPitch = MathHelper.clamp(mc.player.getPitch() + pitchStep, -90.0f, 90.0f);
-
-            // Strict Protocol Validation: Reject NaN or Infinite values before updating client view
-            if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
-                !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
-                mc.player.setYaw(finalYaw);
-                mc.player.setPitch(finalPitch);
-            }
-        } else {
-            float yawStep = Math.min((float) absYaw, stepYaw) * (float) Math.signum(rawDeltaYaw);
-            float pitchStep = Math.min((float) absPitch, stepPitch) * (float) Math.signum(rawDeltaPitch);
-            float finalYaw = (float) Rotations.serverYaw + yawStep;
-            float finalPitch = MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90.0f, 90.0f);
-
-            if (!Float.isNaN(finalYaw) && !Float.isInfinite(finalYaw) &&
-                !Float.isNaN(finalPitch) && !Float.isInfinite(finalPitch)) {
-                Rotations.rotate(finalYaw, finalPitch);
+        } catch (Throwable t) {
+            // Failsafe exception isolation: disable module gracefully to prevent client crash
+            error("Disabling AdvancedAimAssist due to runtime error: " + (t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName()));
+            resetState();
+            if (isActive()) {
+                toggle();
             }
         }
-
-        lastPlayerYaw = mc.player.getYaw();
-        lastPlayerPitch = mc.player.getPitch();
     }
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
-        if (mc.player == null || !mc.player.isAlive()) return;
+        if (mc.player == null || mc.world == null || !mc.player.isAlive()) {
+            target = null;
+            return;
+        }
 
         if (renderCircle.get() && target != null && !AimUtils.isDead(target)) {
-            renderTargetCircle(event);
+            try {
+                renderTargetCircle(event);
+            } catch (Throwable ignored) {
+                // Buffer/matrix protection against native OpenGL crash
+            }
         }
     }
 
@@ -816,7 +897,7 @@ public class AdvancedAimAssist extends Module {
         if (!(entity instanceof PlayerEntity player)) return false;
 
         if (player.isSpectator() || player.isCreative()) return false;
-        if (AimUtils.isDead(entity)) return false;
+        if (entity.isRemoved() || AimUtils.isDead(entity)) return false;
         if (ignoreInvisible.get() && entity.isInvisible()) return false;
         if (!entities.get().isEmpty() && !entities.get().contains(entity.getType())) return false;
         if (ignoreFriends.get() && !Friends.get().shouldAttack(player)) return false;
@@ -835,21 +916,32 @@ public class AdvancedAimAssist extends Module {
         return true;
     }
 
+    /**
+     * Render target circle with guaranteed buffer capacity protection against native crash 0xc0000409.
+     */
     private void renderTargetCircle(Render3DEvent event) {
+        if (event == null || event.renderer == null || target == null || target.isRemoved() || !target.isAlive()) return;
+        if (mc.world == null || target.getEntityWorld() != mc.world) {
+            target = null;
+            return;
+        }
+
         Box box = target.getBoundingBox();
+        if (box == null) return;
         double x = (box.minX + box.maxX) / 2.0;
         double z = (box.minZ + box.maxZ) / 2.0;
         double y = box.minY + circleHeight.get();
 
-        int segments = circleSegments.get();
+        int segments = MathHelper.clamp(circleSegments.get(), 8, 64);
         double radius = circleRadius.get();
         ShapeMode mode = circleShapeMode.get();
 
         Color fill = circleFillColor.get();
         Color outline = circleOutlineColor.get();
 
-        if (mode.sides() && fill.a > 0) {
-            event.renderer.triangles.ensureCapacity(segments + 1, segments * 3);
+        if (mode.sides() && fill != null && fill.a > 0) {
+            // Capacity protection: 1 center + (segments + 1) vertices = segments + 2. Allocate segments + 8 vertices, segments * 3 + 12 indices.
+            event.renderer.triangles.ensureCapacity(segments + 8, segments * 3 + 12);
             int center = event.renderer.triangles.vec3(x, y, z).color(fill).next();
             int previous = -1;
 
@@ -863,8 +955,9 @@ public class AdvancedAimAssist extends Module {
             }
         }
 
-        if (mode.lines() && outline.a > 0) {
-            event.renderer.lines.ensureCapacity(segments + 1, (segments + 1) * 2);
+        if (mode.lines() && outline != null && outline.a > 0) {
+            // Capacity protection: allocate segments + 8 vertices, (segments + 2) * 2 + 12 indices.
+            event.renderer.lines.ensureCapacity(segments + 8, (segments + 2) * 2 + 12);
             int first = -1, previous = -1;
 
             for (int i = 0; i <= segments; i++) {
@@ -876,7 +969,9 @@ public class AdvancedAimAssist extends Module {
                 else event.renderer.lines.line(previous, vertex);
                 previous = vertex;
             }
-            event.renderer.lines.line(previous, first);
+            if (previous != -1 && first != -1) {
+                event.renderer.lines.line(previous, first);
+            }
         }
     }
 
