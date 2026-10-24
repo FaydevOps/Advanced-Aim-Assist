@@ -779,7 +779,7 @@ public class AdvancedAimAssist extends Module {
             double angle = AimUtils.getAngle(look, eye, point);
             if (useFov && angle > halfFov) continue;
 
-            if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point)) continue;
+            if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
 
             candidateCache.add(entity);
         }
@@ -832,7 +832,7 @@ public class AdvancedAimAssist extends Module {
         double effectiveUnlockRange = Math.max(unlockRange.get(), range.get() + 0.5);
 
         if (eye.distanceTo(point) > effectiveUnlockRange) return false;
-        if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point)) return false;
+        if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) return false;
         return true;
     }
 
