@@ -41,6 +41,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 3. Sine Fade-In Target Switch Ramp (Zero hook jerks or micro-jumps on target acquisition)
  * 4. GCD Sub-Pixel Deadzone (Eliminates oscillation/flicker around sensitivity grid boundaries)
  * 5. Strict Additive Pull Assist with Manual Mouse Override Threshold
+ * 6. Freedom Hitbox Roaming & Strict Closest Target Selection (Euclidean distance)
  */
 public class AdvancedAimAssist extends Module {
     private final SettingGroup sgGeneral = settings.createGroup("General");

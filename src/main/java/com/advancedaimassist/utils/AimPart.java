@@ -6,5 +6,6 @@ package com.advancedaimassist.utils;
 public enum AimPart {
     Head,
     Body,
-    Feet
+    Feet,
+    Random
 }
