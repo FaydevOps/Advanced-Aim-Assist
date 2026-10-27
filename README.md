@@ -1,5 +1,6 @@
 # Advanced Aim Assist
-<img width="128" height="128" alt="logo" src="https://github.com/user-attachments/assets/57855f35-c6f4-4e9d-b128-d663deb09ad3" />
+<img width="120" height="120" alt="logo" src="https://github.com/user-attachments/assets/d9a1c1e3-5c51-41c3-86cc-514698984df3" />
+
 **Legit Edition**
 
 An advanced, pro-grade ghost client aim assist addon for
