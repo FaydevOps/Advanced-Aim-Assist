@@ -180,6 +180,12 @@ public class AdvancedAimAssist extends Module {
         .defaultValue(0.004).range(0.0, 1.0).sliderRange(0.0, 0.5)
         .build());
 
+    private final Setting<Double> jitterIntensity = sgHuman.add(new DoubleSetting.Builder()
+        .name("jitter-intensity")
+        .description("Scales all aim noise (roaming, breathing, tremor, speed/snap randomness). 0 = steady aim.")
+        .defaultValue(1.0).range(0.0, 2.0).sliderRange(0.0, 2.0)
+        .build());
+
     private final Setting<Double> hitboxRoaming = sgHuman.add(new DoubleSetting.Builder()
         .name("hitbox-roaming-intensity")
         .description("Allows the aim to drift naturally within the enemy bounding box.")
@@ -357,6 +363,12 @@ public class AdvancedAimAssist extends Module {
     private double  prevAimZ    = 0.0;
     private boolean hasPrevAim  = false;
 
+    // Correlated breathing offset (AR(1)) — drifts smoothly instead of shaking per tick
+    private double  breathX = 0.0;
+    private double  breathY = 0.0;
+    private double  breathZ = 0.0;
+    private static final double BREATH_CORRELATION = 0.85;
+
     // Multi-target transition state
     private float   switchStartYaw   = 0f;
     private float   switchStartPitch = 0f;
@@ -400,6 +412,7 @@ public class AdvancedAimAssist extends Module {
         trackStartNs       = 0L;
         fatigueTicks       = 0;
         hasPrevAim         = false;
+        breathX = breathY = breathZ = 0.0;
         prevStepYaw        = 0f;
         prevStepPitch      = 0f;
         skipTickCounter    = 0;
@@ -481,6 +494,7 @@ public class AdvancedAimAssist extends Module {
     private Vec3d computeAimPointOnce(Entity entity, boolean advanceInterpolation) {
         if (entity == null || mc.player == null) return null;
         final Random rng = ThreadLocalRandom.current();
+        final double jitter = jitterIntensity.get();
         // Reuse a single base point (AimUtils allocates; unavoidable for immutable Vec3d)
         Vec3d base = null;
         try {
@@ -518,7 +532,7 @@ public class AdvancedAimAssist extends Module {
 
         // Bezier Wrist Pivot Arc: REMOVED periodic sine (detectable pattern).
         // Replaced with a subtle, non-periodic lateral offset.
-        if (arcCurvature.get() > 0.0 && mc.player != null) {
+        if (arcCurvature.get() > 0.0 && jitter > 0.0 && mc.player != null) {
             Vec3d eye = mc.player.getEyePos();
             Vec3d toTarget = base.subtract(eye);
             double dist = toTarget.length();
@@ -527,7 +541,7 @@ public class AdvancedAimAssist extends Module {
                 double perpLen = perp.length();
                 if (perpLen > 1e-6) {
                     perp = perp.multiply(1.0 / perpLen);
-                    double offset = arcCurvature.get() * 0.02 * (rng.nextDouble() - 0.5) * dist;
+                    double offset = arcCurvature.get() * 0.02 * jitter * (rng.nextDouble() - 0.5) * dist;
                     base = base.add(perp.multiply(offset));
                 }
             }
@@ -535,8 +549,8 @@ public class AdvancedAimAssist extends Module {
 
         // Hitbox Roaming: REMOVED periodic sine patterns (detectable).
         // Replaced with a single, non-periodic micro-jitter.
-        if (hitboxRoaming.get() > 0.0) {
-            double jitterAmp = hitboxRoaming.get() * 0.02;
+        if (hitboxRoaming.get() > 0.0 && jitter > 0.0) {
+            double jitterAmp = hitboxRoaming.get() * 0.02 * jitter;
             base = base.add(
                 (rng.nextDouble() - 0.5) * jitterAmp,
                 (rng.nextDouble() - 0.5) * jitterAmp * 0.5,
@@ -548,8 +562,8 @@ public class AdvancedAimAssist extends Module {
 
         // --- Visual naturalness: prediction inaccuracy (small random error) ---
         // Humans don't predict perfectly; add tiny noise to the predicted point.
-        if (prediction.get()) {
-            double inaccuracy = humanVariation.get() * 0.2; // FIX 12: was * 0.02
+        if (prediction.get() && jitter > 0.0) {
+            double inaccuracy = humanVariation.get() * 0.2 * jitter; // FIX 12: was * 0.02
             base = base.add(
                 (rng.nextDouble() - 0.5) * inaccuracy,
                 (rng.nextDouble() - 0.5) * inaccuracy * 0.6,
@@ -563,7 +577,7 @@ public class AdvancedAimAssist extends Module {
         // Smooth the aim point toward the target instead of snapping instantly.
         if (advanceInterpolation && hasPrevAim) {
             // Tracking lag: minimal. Large lag creates detectable "delayed tracking".
-            double lagFactor = 0.92 + rng.nextDouble() * 0.06;
+            double lagFactor = Math.min(1.0, 0.95 + (rng.nextDouble() - 0.5) * 0.06 * jitter);
             base = new Vec3d(
                 prevAimX + (base.x - prevAimX) * lagFactor,
                 prevAimY + (base.y - prevAimY) * lagFactor,
@@ -579,12 +593,16 @@ public class AdvancedAimAssist extends Module {
 
         // Breathing/drift: single non-periodic micro-jitter (FIX 3: applied once).
         // FIX 12: recalibrated so the human-variation slider has a visible effect.
-        double breathAmp = 0.005 + humanVariation.get() * 0.05;
-        base = base.add(
-            (rng.nextDouble() - 0.5) * breathAmp,
-            (rng.nextDouble() - 0.5) * breathAmp,
-            (rng.nextDouble() - 0.5) * breathAmp
-        );
+        // Correlated (AR(1)) so it drifts smoothly; white noise here made the
+        // crosshair hop one GCD step back and forth while on target.
+        if (advanceInterpolation) {
+            double breathAmp = (0.005 + humanVariation.get() * 0.05) * jitter;
+            double innov     = breathAmp * Math.sqrt(1.0 - BREATH_CORRELATION * BREATH_CORRELATION);
+            breathX = breathX * BREATH_CORRELATION + (rng.nextDouble() - 0.5) * innov;
+            breathY = breathY * BREATH_CORRELATION + (rng.nextDouble() - 0.5) * innov;
+            breathZ = breathZ * BREATH_CORRELATION + (rng.nextDouble() - 0.5) * innov;
+        }
+        base = base.add(breathX, breathY, breathZ);
 
         // Clamp final aim point inside the target hitbox (with small inner margin)
         // so the attack raycast actually connects instead of grazing the edge.
@@ -670,6 +688,7 @@ public class AdvancedAimAssist extends Module {
             final double rangeVal  = range.get();
             final double escapeVal = escapeAngle.get();
             final Random rng       = ThreadLocalRandom.current();
+            final double jitter    = jitterIntensity.get();
 
             // FIX 1: isolate raw manual mouse delta (rotation at the start of this
             // tick minus the rotation recorded at the start of the previous tick).
@@ -693,7 +712,9 @@ public class AdvancedAimAssist extends Module {
             if (found != target && found != null) {
                 // FIX 5: switchCooldownTicks gates new switches (sticky now holds
                 // the current target independently of the cooldown).
-                if (switchCooldownTicks <= 0) {
+                // Only a switch away from an existing target is gated; acquiring
+                // with no target must not wait out the cooldown.
+                if (target == null || switchCooldownTicks <= 0) {
                     // Smooth transition between targets (flick-like but controlled)
                     target = found;
                     inSwitchTransition = true;
@@ -725,20 +746,28 @@ public class AdvancedAimAssist extends Module {
             double wantedYaw   = angles[0];
             double wantedPitch = angles[1];
 
+            // Silent mode rotates the server-side yaw/pitch while the client camera
+            // stays put, so steps must be measured from the server rotation.
+            // Using the client rotation made the server yaw keep accumulating steps.
+            final boolean silent = aimMode.get() == AimMode.Silent;
+            final float baseYaw   = silent ? (float) Rotations.serverYaw   : currentYaw;
+            final float basePitch = silent ? (float) Rotations.serverPitch : currentPitch;
+            final Vec3d baseLook  = silent ? AimUtils.getLookVector(baseYaw, basePitch) : startLook;
+
             // Pre-compute angle to target (used to gate overshoot / snap)
-            double currentAngleToTarget = AimUtils.getAngle(startLook, eyePos, aimPoint);
+            double currentAngleToTarget = AimUtils.getAngle(baseLook, eyePos, aimPoint);
 
             // ── Micro-Overshoot Injection (2-4 ticks with decay) ─────────────
             // Disabled during target switch transitions for smoother flicks.
             if (microOvershoot.get() && !inSwitchTransition) {
-                double rawCheckDist = Math.abs(MathHelper.wrapDegrees(wantedYaw - currentYaw));
+                double rawCheckDist = Math.abs(MathHelper.wrapDegrees(wantedYaw - baseYaw));
                 if (rawCheckDist > 20.0 && currentAngleToTarget > 12.0
                         && overshootTicksLeft <= 0 && rng.nextDouble() < 0.15) {
                     overshootTicksLeft = rng.nextInt(2, 3); // 2 ticks only
                     overshootDuration  = overshootTicksLeft;
-                    overshootYawOffset   = Math.signum(MathHelper.wrapDegrees(wantedYaw - currentYaw))
+                    overshootYawOffset   = Math.signum(MathHelper.wrapDegrees(wantedYaw - baseYaw))
                                          * rng.nextDouble(0.2, 0.5);
-                    overshootPitchOffset = Math.signum(wantedPitch - currentPitch)
+                    overshootPitchOffset = Math.signum(wantedPitch - basePitch)
                                          * rng.nextDouble(0.1, 0.3);
                 }
             }
@@ -755,7 +784,7 @@ public class AdvancedAimAssist extends Module {
                 && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f
                 && rng.nextDouble() < 0.4) {
                 // FIX 2: reuse the single aim point instead of recomputing it.
-                if (AimUtils.getAngle(startLook, eyePos, aimPoint) < 4.0) {
+                if (AimUtils.getAngle(baseLook, eyePos, aimPoint) < 4.0) {
                     mc.interactionManager.attackEntity(mc.player, target);
                     mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 }
@@ -765,14 +794,14 @@ public class AdvancedAimAssist extends Module {
             boolean playerSteeringAway =
                 Math.abs(manualDeltaYaw) > 0.25f
                 && Math.signum(manualDeltaYaw) != Math.signum(
-                      MathHelper.wrapDegrees(wantedYaw - currentYaw));
+                      MathHelper.wrapDegrees(wantedYaw - baseYaw));
 
             if (playerSteeringAway && currentAngleToTarget > escapeVal) {
                 clearAssist(currentYaw, currentPitch); return;
             }
 
             // Correlated micro-tremor (Ornstein-Uhlenbeck) instead of white noise
-            if (humanVariation.get() > 0) {
+            if (humanVariation.get() > 0 && jitter > 0.0) {
                 double dt = 1.0 / 20.0;
                 double theta = 1.5;
                 double sigma = humanVariation.get() * 0.6; // FIX 12: was * 0.06
@@ -784,23 +813,29 @@ public class AdvancedAimAssist extends Module {
                 tremorYaw   = MathHelper.clamp(tremorYaw,   -tremorMax, tremorMax);
                 tremorPitch = MathHelper.clamp(tremorPitch, -tremorMax, tremorMax);
                 // Tremor: minimal contribution. Large tremor creates detectable jitter.
-                wantedYaw   += tremorYaw * 0.1;
-                wantedPitch  = MathHelper.clamp(wantedPitch + tremorPitch * 0.1, -90.0, 90.0);
+                wantedYaw   += tremorYaw * 0.1 * jitter;
+                wantedPitch  = MathHelper.clamp(wantedPitch + tremorPitch * 0.1 * jitter, -90.0, 90.0);
             }
 
             // GCD quantisation (pre-delta) — ALWAYS when gcdFix enabled
             if (gcdFix.get()) {
-                wantedYaw   = RotationUtils.applyGCD(currentYaw,   wantedYaw);
-                wantedPitch = RotationUtils.applyGCD(currentPitch, wantedPitch);
+                wantedYaw   = RotationUtils.applyGCD(baseYaw,   wantedYaw);
+                wantedPitch = RotationUtils.applyGCD(basePitch, wantedPitch);
             }
 
-            double rawDeltaYaw   = MathHelper.wrapDegrees(wantedYaw   - currentYaw);
-            double rawDeltaPitch = wantedPitch - currentPitch;
+            double rawDeltaYaw   = MathHelper.wrapDegrees(wantedYaw   - baseYaw);
+            double rawDeltaPitch = wantedPitch - basePitch;
             double absYaw        = Math.abs(rawDeltaYaw);
             double absPitch      = Math.abs(rawDeltaPitch);
 
             if (absYaw < 0.0005 && absPitch < 0.0005) {
-                clearAssist(currentYaw, currentPitch); return;
+                // Already on target: hold the lock. clearAssist() here dropped the
+                // target, forcing a re-acquire (reaction delay + switch ramp) = stutter.
+                prevStepYaw     = 0f;
+                prevStepPitch   = 0f;
+                lastPlayerYaw   = tickStartYaw;
+                lastPlayerPitch = tickStartPitch;
+                return;
             }
 
             // Multi-target: transition factor (0→1 over SWITCH_TRANSITION_DURATION ticks)
@@ -883,8 +918,8 @@ public class AdvancedAimAssist extends Module {
             // aim naturally decelerates via ease-out-cubic as it approaches.
 
             // Visual naturalness: per-tick speed variation (humans don't move
-            // at constant speed). ±15% jitter on the step magnitude.
-            double speedJitter = 0.99 + rng.nextDouble() * 0.02;
+            // at constant speed). ±1% jitter on the step magnitude (scaled by jitter-intensity).
+            double speedJitter = 1.0 + (rng.nextDouble() - 0.5) * 0.02 * jitter;
             finalStepYaw   = (float) (finalStepYaw   * speedJitter);
             finalStepPitch = (float) (finalStepPitch * speedJitter);
 
@@ -917,7 +952,7 @@ public class AdvancedAimAssist extends Module {
             // Micro-snap: minimal residual. The ease-out-cubic already decelerates
             // naturally; a large snapFactor creates detectable "hovering".
             if (absYaw < 1.5 && absPitch < 1.5) {
-                double snapFactor = 0.88 + rng.nextDouble() * 0.10;
+                double snapFactor = Math.min(1.0, 0.93 + (rng.nextDouble() - 0.5) * 0.10 * jitter);
                 finalStepYaw   = (float) (absYaw   * snapFactor);
                 finalStepPitch = (float) (absPitch * snapFactor);
             }
@@ -928,20 +963,20 @@ public class AdvancedAimAssist extends Module {
             // Anti-cheat: tiny non-periodic noise (before GCD, so it gets
             // absorbed into gcd alignment). Very small to avoid step flipping.
             if (rng.nextDouble() < 0.2) {
-                yawStep += (rng.nextFloat() - 0.5f) * 0.0005f;
+                yawStep += (rng.nextFloat() - 0.5f) * 0.0005f * (float) jitter;
             }
             if (rng.nextDouble() < 0.15) {
-                pitchStep += (rng.nextFloat() - 0.5f) * 0.0003f;
+                pitchStep += (rng.nextFloat() - 0.5f) * 0.0003f * (float) jitter;
             }
 
             // GCD quantisation (post-step) — ALWAYS when gcdFix enabled
             if (gcdFix.get()) {
-                yawStep   = (float) (RotationUtils.applyGCD(currentYaw,   currentYaw   + yawStep)   - currentYaw);
-                pitchStep = (float) (RotationUtils.applyGCD(currentPitch, currentPitch + pitchStep) - currentPitch);
+                yawStep   = (float) (RotationUtils.applyGCD(baseYaw,   baseYaw   + yawStep)   - baseYaw);
+                pitchStep = (float) (RotationUtils.applyGCD(basePitch, basePitch + pitchStep) - basePitch);
             }
 
-            float finalYaw   = currentYaw   + yawStep;
-            float finalPitch = MathHelper.clamp(currentPitch + pitchStep, -90.0f, 90.0f);
+            float finalYaw   = baseYaw   + yawStep;
+            float finalPitch = MathHelper.clamp(basePitch + pitchStep, -90.0f, 90.0f);
 
             // ⚠️ EMA smoothing REMOVED from rotation delta.
             // EMA on the delta breaks GCD alignment: the final yawStep is no
@@ -954,14 +989,12 @@ public class AdvancedAimAssist extends Module {
             }
 
             if (Math.abs(yawStep) > 0.0001f || Math.abs(pitchStep) > 0.0001f) {
-                if (aimMode.get() == AimMode.Client || aimMode.get() == AimMode.Assist) {
+                if (!silent) {
                     mc.player.setYaw(finalYaw);
                     mc.player.setPitch(finalPitch);
                 } else {
-                    Rotations.rotate(
-                        (float) Rotations.serverYaw   + yawStep,
-                        MathHelper.clamp((float) Rotations.serverPitch + pitchStep, -90f, 90f)
-                    );
+                    // baseYaw/basePitch are the server rotation in Silent mode
+                    Rotations.rotate(finalYaw, finalPitch);
                 }
             }
 
@@ -1016,6 +1049,7 @@ public class AdvancedAimAssist extends Module {
         aimPartTicks   = 0;
         resolveAimPart();
         hasPrevAim     = false;
+        breathX = breathY = breathZ = 0.0;
         trackStartNs   = 0L;
         fatigueTicks   = 0;
         switchCooldownTicks = switchCooldown.get();
