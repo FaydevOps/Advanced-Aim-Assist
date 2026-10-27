@@ -14,7 +14,7 @@ An advanced, pro-grade ghost client aim assist addon for
 [![GitHub Stars](https://img.shields.io/github/stars/FaydevOps/Advanced-Aim-Assist?style=flat-square&color=yellow)](https://github.com/FaydevOps/Advanced-Aim-Assist/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/FaydevOps/Advanced-Aim-Assist?style=flat-square)](https://github.com/FaydevOps/Advanced-Aim-Assist/issues)
 [![GitHub Last Commit](https://img.shields.io/github/last-commit/FaydevOps/Advanced-Aim-Assist?style=flat-square)](https://github.com/FaydevOps/Advanced-Aim-Assist/commits/main)
-[![PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/@FaycraxE)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/FaycraxE)
 
 </div>
 
