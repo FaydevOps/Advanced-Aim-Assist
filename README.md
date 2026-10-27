@@ -1,59 +1,128 @@
+# Advanced Aim Assist
 <img width="128" height="128" alt="logo" src="https://github.com/user-attachments/assets/57855f35-c6f4-4e9d-b128-d663deb09ad3" />
-# Advanced Aim Assist ( Legit Editition
+**Legit Edition**
 
-An advanced, pro-grade ghost client aim assist addon for [Meteor Client](https://meteorclient.com), built on the Fabric addon API. Designed specifically for strict anti-cheat bypass (Grim, Vulcan) and 100% natural, humanized PvP combat performance.
+An advanced, pro-grade ghost client aim assist addon for
+[Meteor Client](https://meteorclient.com) — engineered for **strict anti-cheat environments** (Grim, Vulcan) and **100% natural, humanized PvP performance**.
 
-## Core Features (DemonClient v2.2 Architecture)
+[![Minecraft](https://img.shields.io/badge/Minecraft-1.21.11-62B47A?style=flat-square)](https://minecraft.net)
+[![Fabric](https://img.shields.io/badge/Fabric%20Loader-0.18.2-DBB69A?style=flat-square)](https://fabricmc.net)
+[![Meteor](https://img.shields.io/badge/Meteor-1.21.11--SNAPSHOT-9146FF?style=flat-square)](https://meteorclient.com)
+[![JDK](https://img.shields.io/badge/JDK-21-orange?style=flat-square)](https://adoptium.net)
+[![License: CC0](https://img.shields.io/badge/License-CC0-lightgrey?style=flat-square)](LICENSE)
 
-- **Strict Player-Only Targeting:** Exclusively targets real players (`PlayerEntity`), completely ignoring mobs, animals, villagers, and NPCs to prevent crosshair misdirection in survival worlds or farms.
-- **Additive Pull Assist (Zero Mouse Conflicts):** Acts as a magnetic "sticky glue" without ever overwriting the player's absolute camera rotation, allowing seamless user mouse collaboration and free cursor movement.
-- **Freedom Hitbox Roaming:** Allows the target aim point to orbit and wander organically within the enemy's BoundingBox dimensions (Head, Body, Feet) without locking onto a rigid pixel.
-- **Strict Euclidean Closest Target Selection & Hysteresis:** Prioritizes the absolute closest opponent by Euclidean distance from player eyes, with robust sticky locking and unlock range thresholds.
-- **Deep Ease-Out Damping & Heavy Inertia:** Smooth deceleration curve approaching the target with zero free-standing micro-pauses or freezes.
-- **Ultra-Subtle Multi-Frequency Micro-Noise:** Microscopic human variation noise (centered around `0.02°`) that completely evades advanced heuristic anti-cheats (Grim, Vulcan) without producing artificial visual jitter or shake.
-- **GCD Sensitivity Grid Bypass:** Exact Mouse Sensitivity GCD rounding (~0.0055°) to seamlessly bypass strict client-side movement and rotation checks.
-- **Manual Mouse Override Threshold:** Instantly yields absolute manual control back to the user if intentional mouse movement is detected (`mouse-threshold`).
-- **Sine Fade-In Target Switch Ramp:** Smooth sine-based transition when acquiring new targets to eliminate any sudden hook jerks or micro-jump snaps.
-- **Public `getAimAngles()` API:** Clean public rotation provider method enabling external modules like KillAura to integrate seamlessly.
+[![GitHub Stars](https://img.shields.io/github/stars/FaydevOps/Advanced-Aim-Assist?style=flat-square&color=yellow)](https://github.com/FaydevOps/Advanced-Aim-Assist/stargazers)
+[![GitHub Issues](https://img.shields.io/github/issues/FaydevOps/Advanced-Aim-Assist?style=flat-square)](https://github.com/FaydevOps/Advanced-Aim-Assist/issues)
+[![GitHub Last Commit](https://img.shields.io/github/last-commit/FaydevOps/Advanced-Aim-Assist?style=flat-square)](https://github.com/FaydevOps/Advanced-Aim-Assist/commits/main)
+[![PayPal](https://img.shields.io/badge/Donate-PayPal-00457C?style=flat-square&logo=paypal&logoColor=white)](https://paypal.me/@FaycraxE)
 
-## Requirements
+</div>
 
-| Component | Version |
-| --- | --- |
-| Minecraft | 1.21.11 |
-| Yarn mappings | 1.21.11+build.3 |
-| Fabric Loader | 0.18.2 |
-| Meteor Client | 1.21.11-SNAPSHOT |
-| Gradle | 9.2.0 |
-| JDK | 21 |
+---
 
-## Building
+## 📖 Table of Contents
 
-Windows:
+- [Why Advanced Aim Assist?](#-why-advanced-aim-assist)
+- [What's New — Multi-Target Update](#-whats-new--multi-target-update)
+- [Preview](#-preview)
+- [Core Features](#-core-features)
+    - [Targeting](#targeting)
+    - [Humanization](#humanization)
+    - [Anti-Cheat Safety](#anti-cheat-safety)
+    - [Integration](#integration)
+- [Quick Start](#-quick-start)
+- [Requirements](#-requirements)
+- [Building](#-building)
+- [Installing](#-installing)
+- [Configuration Reference](#-configuration-reference)
+    - [Core Settings](#core-settings)
+    - [Multi-Target Settings](#multi-target-settings)
+- [Multi-Target PvP Tips](#-multi-target-pvp-tips)
+- [FAQ](#-faq)
+- [Troubleshooting](#-troubleshooting)
+- [Support the Project](#-support-the-project)
+- [Changelog](#-changelog)
+- [Contributing](#-contributing)
+- [License & Disclaimer](#-license--disclaimer)
 
-```powershell
-.\gradlew.bat build -Dorg.gradle.java.home="C:\path\to\jdk-21"
-```
+---
 
-Linux/macOS:
+## 🎯 Why Advanced Aim Assist?
 
-```bash
-./gradlew build
-```
+There are many aim assist addons for Meteor. Here's what sets this one apart:
 
-The output jar is written to:
+| Feature                            | Typical addons              | **Advanced Aim Assist**                            |
+| ---------------------------------- | --------------------------- | -------------------------------------------------- |
+| Target selection                   | Closest only                | **Threat-weighted score** (distance / angle / HP)  |
+| Rotation output                    | Overwrites camera           | **Additive pull** — coexists with your mouse       |
+| Anti-cheat handling                | Optional GCD rounding       | **GCD grid enforced on every delta**               |
+| Target switching                   | Instant snap                | **Eased 6-tick blend** (human flick pattern)       |
+| Micro-movement                     | White noise jitter          | **Multi-frequency noise** (~0.02°, below AC heuristics) |
+| Hitbox targeting                   | Fixed pixel                 | **Organic roaming** inside the BoundingBox         |
+| Public API                         | ❌                          | ✅ **\`getAimAngles()\`** for KillAura & friends    |
+| Strict player-only                 | ⚠️ Often includes mobs      | ✅ Only \`PlayerEntity\`                            |
+
+> [!NOTE]
+> This addon is designed as a **legit / ghost client** assist — it never
+> overwrites your absolute camera rotation, so it can be used alongside
+> normal gameplay without visual fight conflicts.
+
+---
+
+## 🆕 What's New — Multi-Target Update
+
+- **Threat-Based Scoring** — Target selection weighs **distance (40%)**, **view angle (30%)**, **target health (20%)**, plus a **10% proximity bonus** for enemies within 3 blocks. The crosshair locks onto the *most dangerous* enemy, not just the nearest one.
+- **Smooth Target Transitions** — Switching targets uses an **ease-in blend over 6 ticks**, mirroring a natural human flick. Overshoot is suppressed during the transition so the crosshair never snaps.
+- **Improved Sticky Targeting** — The current target is retained while valid, eliminating suspicious switches.
+- **Natural Cycle Mode** — Opt-in target cycling with configurable cooldown and the same eased transition.
+- **Smart Prioritization** — Enemies closer than 3 blocks receive a threat-score bonus.
+
+---
+
+## 📸 Preview
+
+<div align="center">
+
+> *Screenshots and demo GIFs coming soon. PRs welcome!*
+
+| Single-Target Tracking | Multi-Target Transition |
+| ---------------------- | ----------------------- |
+| *placeholder*          | *placeholder*           |
+
+</div>
+
+---
+
+## ✨ Core Features
+
+### Targeting
+
+- **Strict Player-Only Targeting** — Exclusively targets \`PlayerEntity\` instances. Mobs, animals, villagers, and NPCs are ignored.
+- **Multi-Target Selection** — Threat-scored \`Closest\` / \`Cycle\` modes with sticky locking and hysteresis.
+- **Euclidean Closest Selection** — Closest opponent by Euclidean distance from player eyes, with unlock-range hysteresis.
+- **Freedom Hitbox Roaming** — The aim point drifts organically inside the target's \`BoundingBox\` (Head / Body / Feet) instead of locking to a fixed pixel.
+
+### Humanization
+
+- **Deep Ease-Out Damping** — Smooth deceleration curve approaching the target with zero micro-pauses.
+- **Multi-Frequency Micro-Noise** — Microscopic variation (~\`0.02°\`), deliberately kept below the detection thresholds of advanced heuristic anti-cheats.
+- **Sine Fade-In Target Switch Ramp** — Eliminates hook jerks and micro-jumps on target acquisition.
+- **Additive Pull Assist** — Never overwrites absolute camera rotation; the user's mouse and the assist coexist without conflict.
+
+### Anti-Cheat Safety
+
+- **GCD Sensitivity Grid Bypass** — Exact mouse-sensitivity GCD rounding (~\`0.0055°\`) matching the client-side movement check, applied to **every** smoothed delta before it reaches the player rotation.
+- **Manual Mouse Override Threshold** — Instantly yields absolute control back to the user when intentional mouse movement is detected (\`mouse-threshold\`).
+
+### Integration
+
+- **Public \`getAimAngles()\` API** — Clean rotation provider for external modules (KillAura, etc.) without duplicating logic.
+
+---
+
+## ⚡ Quick Start
 
 ```text
-build/libs/advanced-aim-assist-1.0.0.jar
-```
-
-## Installing and Testing
-
-1. Install Minecraft 1.21.11 with Fabric Loader 0.18.2 or newer.
-2. Put the Meteor Client jar and `advanced-aim-assist-1.0.0.jar` in your `.minecraft/mods` folder.
-3. Launch the Fabric profile.
-4. Open the Meteor GUI and enable **Advanced Aim Assist** under **Combat**, or run `.t advanced-aim-assist`.
-
-## License
-
-This project is available under the CC0 license. Feel free to use it for your own projects.
+1. Drop Meteor Client + advanced-aim-assist-1.0.0.jar into .minecraft/mods
+2. Launch Fabric 1.21.11 profile
+3. Enable via GUI (Combat → Advanced Aim Assist) or run .t advanced-aim-assist
