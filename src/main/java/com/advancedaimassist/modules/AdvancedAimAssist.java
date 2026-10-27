@@ -482,6 +482,7 @@ public class AdvancedAimAssist extends Module {
 
         Vec3d eye   = mc.player.getEyePos();
         Vec3d point = buildInterpolatedAimPoint(targetEntity);
+        if (point == null) return null;
 
         float yaw   = (float) AimUtils.getYaw(eye, point);
         float pitch = (float) MathHelper.clamp(AimUtils.getPitch(eye, point), -90.0, 90.0);
@@ -491,8 +492,16 @@ public class AdvancedAimAssist extends Module {
     }
 
     private Vec3d buildInterpolatedAimPoint(Entity entity) {
+        if (entity == null || mc.player == null) return null;
         // Reuse a single base point (AimUtils allocates; unavoidable for immutable Vec3d)
-        Vec3d base = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+        Vec3d base = null;
+        try {
+            base = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+        } catch (NullPointerException | IllegalStateException e) {
+            LOG.debug("getAimPoint failed", e);
+            return null;
+        }
+        if (base == null) return null;
 
         // Kinematic Velocity Intercept with ping compensation + parabolic vertical
         if (prediction.get() && mc.player != null) {
@@ -739,10 +748,12 @@ public class AdvancedAimAssist extends Module {
                 && ThreadLocalRandom.current().nextDouble() < 0.6) {
                 Vec3d eye   = mc.player.getEyePos();
                 Vec3d point = buildInterpolatedAimPoint(target);
-                Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
-                if (AimUtils.getAngle(look, eye, point) < 4.0) {
-                    mc.interactionManager.attackEntity(mc.player, target);
-                    mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                if (point != null) {
+                    Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
+                    if (AimUtils.getAngle(look, eye, point) < 4.0) {
+                        mc.interactionManager.attackEntity(mc.player, target);
+                        mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
+                    }
                 }
             }
 
@@ -1029,9 +1040,10 @@ public class AdvancedAimAssist extends Module {
     }
 
     private Entity findBestTarget() {
-        if (sticky.get() && target != null && isValidStickyTarget(target) && switchCooldownTicks > 0) {
-            return target;
-        }
+        try {
+            if (sticky.get() && target != null && isValidStickyTarget(target) && switchCooldownTicks > 0) {
+                return target;
+            }
 
         Vec3d  eye     = mc.player.getEyePos();
         Vec3d  look    = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
@@ -1104,6 +1116,10 @@ public class AdvancedAimAssist extends Module {
         }
 
         return targetCache.get(0).entity();
+        } catch (NullPointerException | IllegalStateException | ConcurrentModificationException e) {
+            LOG.debug("findBestTarget failed", e);
+            return null;
+        }
     }
 
     /**

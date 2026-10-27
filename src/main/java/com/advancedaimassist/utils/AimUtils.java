@@ -115,7 +115,7 @@ public final class AimUtils {
      * combined with entity visibility check.
      */
     public static boolean hasLineOfSight(Vec3d from, Vec3d to, Entity target) {
-        if (mc.world == null) return true;
+        if (mc.world == null || mc.player == null) return true;
         RaycastContext context = new RaycastContext(
             from,
             to,
