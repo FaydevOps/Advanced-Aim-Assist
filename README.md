@@ -83,11 +83,9 @@ There are many aim assist addons for Meteor. Here's what sets this one apart:
 
 <div align="center">
 
-> *Screenshots and demo GIFs coming soon. PRs welcome!*
+[![Advanced Aim Assist — Demo](https://img.youtube.com/vi/YW-reiVP2Ls/maxresdefault.jpg)](https://youtu.be/YW-reiVP2Ls)
 
-| Single-Target Tracking | Multi-Target Transition |
-| ---------------------- | ----------------------- |
-| *placeholder*          | *placeholder*           |
+*Click the thumbnail to watch the demo on YouTube*
 
 </div>
 
