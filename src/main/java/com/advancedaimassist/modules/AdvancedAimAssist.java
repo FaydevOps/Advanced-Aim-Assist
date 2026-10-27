@@ -394,7 +394,7 @@ public class AdvancedAimAssist extends Module {
     // ------------------------------------------------------------------ ctor
     public AdvancedAimAssist() {
         super(Categories.Combat, "advanced-aim-assist",
-              "DemonClient v2.2 — ease-out-cubic, correlated tremor, GCD bypass.");
+              "ease-out-cubic, correlated tremor, GCD bypass.");
     }
 
     // ------------------------------------------------------------------ lifecycle
