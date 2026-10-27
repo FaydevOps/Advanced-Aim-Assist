@@ -501,10 +501,10 @@ public class AdvancedAimAssist extends Module {
             int   ticks     = getEffectivePredictionTicks();
 
             // Dampened prediction: over-leading is a common anti-cheat trigger
-            double relX = (targetVel.x - playerVel.x * 0.40) * ticks * 0.75;
-            double relZ = (targetVel.z - playerVel.z * 0.40) * ticks * 0.75;
+            double relX = (targetVel.x - playerVel.x * 0.40) * ticks * 0.85;
+            double relZ = (targetVel.z - playerVel.z * 0.40) * ticks * 0.85;
             // Parabolic vertical prediction (gravity + drag), conservative
-            double relY = AimUtils.predictVerticalOffset(targetVel.y, ticks) * 0.35;
+            double relY = AimUtils.predictVerticalOffset(targetVel.y, ticks) * 0.50;
 
             Box    box  = entity.getBoundingBox();
             double maxH = (box.maxX - box.minX) * 1.5;
@@ -578,7 +578,7 @@ public class AdvancedAimAssist extends Module {
         // --- Visual naturalness: tracking lag (human reaction delay) ---
         // Smooth the aim point toward the target instead of snapping instantly.
         if (hasPrevAim) {
-            double lagFactor = 0.75 + ThreadLocalRandom.current().nextDouble() * 0.10;
+            double lagFactor = 0.82 + ThreadLocalRandom.current().nextDouble() * 0.12;
             base = new Vec3d(
                 prevAimX + (base.x - prevAimX) * lagFactor,
                 prevAimY + (base.y - prevAimY) * lagFactor,
@@ -809,7 +809,7 @@ public class AdvancedAimAssist extends Module {
             // don't move the mouse every 50 ms). ~12% of ticks.
             if (skipTickCounter > 0) {
                 skipTickCounter--;
-            } else if (ThreadLocalRandom.current().nextDouble() < 0.06) {
+            } else if (ThreadLocalRandom.current().nextDouble() < 0.03) {
                 skipTickCounter = 1;
                 lastPlayerYaw = currentYaw;
                 lastPlayerPitch = currentPitch;
@@ -852,10 +852,10 @@ public class AdvancedAimAssist extends Module {
                 }
             }
 
-            // Reduced velocity floor: perfect strafe-tracking is a detection vector.
-            // Use a much lower floor so the aim doesn't lock onto lateral movement.
-            float floorYaw   = Math.max(targetAngularSpeedYaw * 0.3f, 0.10f) * (float) (0.5 + 0.2 * glue);
-            float floorPitch = Math.max(targetAngularSpeedPitch * 0.3f, 0.06f) * (float) (0.5 + 0.2 * glue);
+            // Velocity floor: enough to follow strafes but not perfect tracking.
+            // Balance between hit registration and anti-cheat.
+            float floorYaw   = Math.max(targetAngularSpeedYaw * 0.5f, 0.15f) * (float) (0.6 + 0.2 * glue);
+            float floorPitch = Math.max(targetAngularSpeedPitch * 0.5f, 0.08f) * (float) (0.6 + 0.2 * glue);
 
             float finalStepYaw   = (float) Math.max(stepY, floorYaw);
             float finalStepPitch = (float) Math.max(stepP, floorPitch);
@@ -869,12 +869,12 @@ public class AdvancedAimAssist extends Module {
             // Micro-magnetism inside hitbox (<6°)
             // Micro-magnetism: heavily reduced. The "pull to center" pattern is
             // a known detection vector for Grim/Vulcan (snap-to-center).
-            if (microMagnetism.get() > 0.0 && absYaw < 4.0 && ThreadLocalRandom.current().nextDouble() < 0.3) {
-                double mag = (1.0 - absYaw / 4.0) * microMagnetism.get() * 0.06;
+            if (microMagnetism.get() > 0.0 && absYaw < 5.0) {
+                double mag = (1.0 - absYaw / 5.0) * microMagnetism.get() * 0.15;
                 finalStepYaw += finalStepYaw * mag;
             }
-            if (microMagnetism.get() > 0.0 && absPitch < 3.0 && ThreadLocalRandom.current().nextDouble() < 0.3) {
-                double mag = (1.0 - absPitch / 3.0) * microMagnetism.get() * 0.06;
+            if (microMagnetism.get() > 0.0 && absPitch < 4.0) {
+                double mag = (1.0 - absPitch / 4.0) * microMagnetism.get() * 0.15;
                 finalStepPitch += finalStepPitch * mag;
             }
 
@@ -897,8 +897,8 @@ public class AdvancedAimAssist extends Module {
 
             // Anti-cheat: jerk (acceleration) limit. Humans can't change
             // rotation speed instantly; clamp the per-tick step delta.
-            double maxYawJerk   = 1.5;
-            double maxPitchJerk = 1.0;
+            double maxYawJerk   = 2.5;
+            double maxPitchJerk = 1.8;
             double yawDelta   = finalStepYaw   - prevStepYaw;
             double pitchDelta = finalStepPitch - prevStepPitch;
             yawDelta   = MathHelper.clamp(yawDelta,   -maxYawJerk,   maxYawJerk);
@@ -911,7 +911,7 @@ public class AdvancedAimAssist extends Module {
             // Final snap when already on-target: close most of the gap so the
             // hit connects, but leave a tiny residual so it doesn't look locked. ⚠️
             if (absYaw < 1.5 && absPitch < 1.5) {
-                double snapFactor = 0.40 + ThreadLocalRandom.current().nextDouble() * 0.15;
+                double snapFactor = 0.70 + ThreadLocalRandom.current().nextDouble() * 0.15;
                 finalStepYaw   = (float) (absYaw   * snapFactor);
                 finalStepPitch = (float) (absPitch * snapFactor);
             }
@@ -941,7 +941,7 @@ public class AdvancedAimAssist extends Module {
             // Smoothing the delta (speed) instead of absolute position prevents
             // lag when the target moves fast, while still looking smooth.
             if (hasEma) {
-                double alpha = 0.40 + ThreadLocalRandom.current().nextDouble() * 0.25;
+                double alpha = 0.55 + ThreadLocalRandom.current().nextDouble() * 0.20;
                 emaYaw   = emaYaw   + (yawStep   - emaYaw)   * alpha;
                 emaPitch = emaPitch + (pitchStep - emaPitch) * alpha;
                 yawStep   = (float) emaYaw;
