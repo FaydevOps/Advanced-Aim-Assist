@@ -21,7 +21,11 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.passive.VillagerEntity;
+import net.minecraft.entity.passive.WanderingTraderEntity;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.Items;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -33,6 +37,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.ConcurrentModificationException;
 import java.util.List;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -97,7 +102,7 @@ public class AdvancedAimAssist extends Module {
     private final Setting<Double> horizontalSpeed = sgGeneral.add(new DoubleSetting.Builder()
         .name("horizontal-speed")
         .description("Peak horizontal angular speed (deg/sec).")
-        .defaultValue(120.0).range(20.0, 720.0).sliderRange(40.0, 500.0)
+        .defaultValue(160.0).range(20.0, 720.0).sliderRange(40.0, 500.0)
         .build());
 
     private final Setting<Double> verticalSpeed = sgGeneral.add(new DoubleSetting.Builder()
@@ -127,7 +132,7 @@ public class AdvancedAimAssist extends Module {
     private final Setting<Integer> predictionTicks = sgGeneral.add(new IntSetting.Builder()
         .name("prediction-ticks")
         .description("Tick lookahead for intercept calculation.")
-        .defaultValue(2).range(1, 6).sliderRange(1, 5)
+        .defaultValue(2).range(1, 5).sliderRange(1, 5) // FIX 11: align with validateSettings clamp (1..5)
         .visible(prediction::get)
         .build());
 
@@ -330,8 +335,6 @@ public class AdvancedAimAssist extends Module {
     private int     switchCooldownTicks;
     private int     cycleTimer;
 
-    private float   prevAssistYaw   = 0f;
-    private float   prevAssistPitch = 0f;
     private float   lastPlayerYaw   = 0f;
     private float   lastPlayerPitch = 0f;
     private long    lastTickNs      = 0L;
@@ -347,9 +350,6 @@ public class AdvancedAimAssist extends Module {
     private double  tremorPitch = 0.0;
 
     // Visual naturalness state
-    private double  aimLagYaw   = 0.0;   // tracking lag (human reaction delay)
-    private double  aimLagPitch = 0.0;
-    private double  pathPhase   = 0.0;   // phase for curved movement paths
     private long    trackStartNs = 0L;    // for fatigue simulation
     private int     fatigueTicks = 0;
     private double  prevAimX    = 0.0;
@@ -357,19 +357,7 @@ public class AdvancedAimAssist extends Module {
     private double  prevAimZ    = 0.0;
     private boolean hasPrevAim  = false;
 
-    // Ghost aim state
-    private double  emaYaw      = 0.0;   // exponential moving average for smooth output
-    private double  emaPitch    = 0.0;
-    private boolean hasEma      = false;
-    private double  breathPhase = 0.0;   // breathing simulation
-    private double  driftPhase  = 0.0;   // organic drift around target
-    private double  flickTimer  = 0.0;   // human flick simulation
-    private double  prevRawYaw  = 0.0;
-    private double  prevRawPitch = 0.0;
-
     // Multi-target transition state
-    private Entity  prevTarget   = null;
-    private long    targetSwitchNs = 0L;
     private float   switchStartYaw   = 0f;
     private float   switchStartPitch = 0f;
     private boolean inSwitchTransition = false;
@@ -380,6 +368,11 @@ public class AdvancedAimAssist extends Module {
     private float   prevStepYaw   = 0f;
     private float   prevStepPitch = 0f;
     private int     skipTickCounter = 0;
+
+    // FIX 10: aim part resolved once and held across ticks (stable for Random)
+    private AimPart currentAimPart = AimPart.Body;
+    private int     aimPartTicks   = 0;
+    private static final int AIM_PART_REROLL_TICKS = 10;
 
     private final List<AimTarget> targetCache = new ArrayList<>(16);
     private final List<Entity>    targetEntityCache = new ArrayList<>(32);
@@ -398,33 +391,19 @@ public class AdvancedAimAssist extends Module {
         reactionReadyAt    = 0L;
         switchCooldownTicks = 0;
         cycleTimer         = 0;
-        prevAssistYaw      = 0f;
-        prevAssistPitch    = 0f;
         overshootTicksLeft = 0;
         overshootDuration  = 0;
         overshootYawOffset = 0.0;
         overshootPitchOffset = 0.0;
         tremorYaw          = 0.0;
         tremorPitch        = 0.0;
-        aimLagYaw          = 0.0;
-        aimLagPitch        = 0.0;
-        pathPhase          = 0.0;
         trackStartNs       = 0L;
         fatigueTicks       = 0;
         hasPrevAim         = false;
         prevStepYaw        = 0f;
         prevStepPitch      = 0f;
         skipTickCounter    = 0;
-        hasEma             = false;
-        emaYaw             = 0.0;
-        emaPitch           = 0.0;
-        breathPhase        = 0.0;
-        driftPhase         = 0.0;
-        flickTimer         = 0.0;
-        prevRawYaw         = 0.0;
-        prevRawPitch       = 0.0;
-        prevTarget         = null;
-        targetSwitchNs     = 0L;
+        aimPartTicks       = 0;
         inSwitchTransition = false;
         switchTransitionTicks = 0;
         targetCache.clear();
@@ -468,9 +447,12 @@ public class AdvancedAimAssist extends Module {
     private boolean isHoldingWeapon() {
         if (mc.player == null) return false;
         try {
-            String name = mc.player.getMainHandStack().getItem().toString().toLowerCase();
-            return name.contains("sword") || name.contains("axe")
-                || name.contains("trident") || name.contains("mace");
+            // FIX 17: use item tags/identity instead of toString() substring matching.
+            var stack = mc.player.getMainHandStack();
+            return stack.isIn(ItemTags.SWORDS)
+                || stack.isIn(ItemTags.AXES)
+                || stack.getItem() == Items.TRIDENT
+                || stack.getItem() == Items.MACE;
         } catch (NullPointerException | IllegalStateException e) {
             return false;
         }
@@ -478,25 +460,31 @@ public class AdvancedAimAssist extends Module {
 
     // ------------------------------------------------------------------ public API
     public float[] getAimAngles(Entity targetEntity) {
-        if (targetEntity == null || mc.player == null) return null;
+        // FIX 2: external clients only; do not advance interpolation state.
+        return anglesFromPoint(computeAimPointOnce(targetEntity, false));
+    }
 
+    private float[] anglesFromPoint(Vec3d point) {
+        if (point == null || mc.player == null) return null;
         Vec3d eye   = mc.player.getEyePos();
-        Vec3d point = buildInterpolatedAimPoint(targetEntity);
-        if (point == null) return null;
-
         float yaw   = (float) AimUtils.getYaw(eye, point);
         float pitch = (float) MathHelper.clamp(AimUtils.getPitch(eye, point), -90.0, 90.0);
-
         if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) return null;
         return new float[]{ yaw, pitch };
     }
 
     private Vec3d buildInterpolatedAimPoint(Entity entity) {
+        // FIX 2: single onTick entry point that advances interpolation state.
+        return computeAimPointOnce(entity, true);
+    }
+
+    private Vec3d computeAimPointOnce(Entity entity, boolean advanceInterpolation) {
         if (entity == null || mc.player == null) return null;
+        final Random rng = ThreadLocalRandom.current();
         // Reuse a single base point (AimUtils allocates; unavoidable for immutable Vec3d)
         Vec3d base = null;
         try {
-            base = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+            base = AimUtils.getAimPoint(entity, currentAimPart, false, 0); // FIX 10
         } catch (NullPointerException | IllegalStateException e) {
             LOG.debug("getAimPoint failed", e);
             return null;
@@ -507,13 +495,16 @@ public class AdvancedAimAssist extends Module {
         if (prediction.get() && mc.player != null) {
             Vec3d targetVel = entity.getVelocity();
             Vec3d playerVel = mc.player.getVelocity();
-            int   ticks     = getEffectivePredictionTicks();
+            int   ticks     = getEffectivePredictionTicks(entity); // FIX 7
 
             // Dampened prediction: over-leading is a common anti-cheat trigger
             double relX = (targetVel.x - playerVel.x * 0.40) * ticks * 0.85;
             double relZ = (targetVel.z - playerVel.z * 0.40) * ticks * 0.85;
-            // Parabolic vertical prediction (gravity + drag), conservative
-            double relY = AimUtils.predictVerticalOffset(targetVel.y, ticks) * 0.50;
+            // Parabolic vertical prediction (gravity + drag), conservative.
+            // FIX 8: grounded targets have no meaningful vertical motion to lead.
+            double relY = entity.isOnGround()
+                ? 0.0
+                : AimUtils.predictVerticalOffset(targetVel.y, ticks) * 0.50;
 
             Box    box  = entity.getBoundingBox();
             double maxH = (box.maxX - box.minX) * 1.5;
@@ -536,7 +527,7 @@ public class AdvancedAimAssist extends Module {
                 double perpLen = perp.length();
                 if (perpLen > 1e-6) {
                     perp = perp.multiply(1.0 / perpLen);
-                    double offset = arcCurvature.get() * 0.02 * (ThreadLocalRandom.current().nextDouble() - 0.5) * dist;
+                    double offset = arcCurvature.get() * 0.02 * (rng.nextDouble() - 0.5) * dist;
                     base = base.add(perp.multiply(offset));
                 }
             }
@@ -547,9 +538,9 @@ public class AdvancedAimAssist extends Module {
         if (hitboxRoaming.get() > 0.0) {
             double jitterAmp = hitboxRoaming.get() * 0.02;
             base = base.add(
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * jitterAmp,
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * jitterAmp * 0.5,
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * jitterAmp
+                (rng.nextDouble() - 0.5) * jitterAmp,
+                (rng.nextDouble() - 0.5) * jitterAmp * 0.5,
+                (rng.nextDouble() - 0.5) * jitterAmp
             );
         }
 
@@ -558,76 +549,84 @@ public class AdvancedAimAssist extends Module {
         // --- Visual naturalness: prediction inaccuracy (small random error) ---
         // Humans don't predict perfectly; add tiny noise to the predicted point.
         if (prediction.get()) {
-            double inaccuracy = humanVariation.get() * 0.02;
+            double inaccuracy = humanVariation.get() * 0.2; // FIX 12: was * 0.02
             base = base.add(
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * inaccuracy,
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * inaccuracy * 0.6,
-                (ThreadLocalRandom.current().nextDouble() - 0.5) * inaccuracy
+                (rng.nextDouble() - 0.5) * inaccuracy,
+                (rng.nextDouble() - 0.5) * inaccuracy * 0.6,
+                (rng.nextDouble() - 0.5) * inaccuracy
             );
         }
 
-        // --- Visual naturalness: path curvature (wrist arc) ---
-        // Move the aim point slightly perpendicular to the aim direction,
-        // varying over time, so movement follows a curve instead of a straight line.
-        if (arcCurvature.get() > 0.0 && mc.player != null) {
-            Vec3d eye = mc.player.getEyePos();
-            Vec3d toTarget = base.subtract(eye);
-            double dist = toTarget.length();
-            if (dist > 0.5) {
-                Vec3d perp = new Vec3d(-toTarget.z, 0, toTarget.x);
-                double perpLen = perp.length();
-                if (perpLen > 1e-6) {
-                    perp = perp.multiply(1.0 / perpLen);
-                    // Non-periodic lateral offset (no sine pattern)
-                    double curveAmp = arcCurvature.get() * 0.02 * (ThreadLocalRandom.current().nextDouble() - 0.5) * dist;
-                    base = base.add(perp.multiply(curveAmp));
-                }
-            }
-        }
+        // FIX 3: duplicate path-curvature block removed (arc is applied once above).
 
         // --- Visual naturalness: tracking lag (human reaction delay) ---
         // Smooth the aim point toward the target instead of snapping instantly.
-        if (hasPrevAim) {
+        if (advanceInterpolation && hasPrevAim) {
             // Tracking lag: minimal. Large lag creates detectable "delayed tracking".
-            double lagFactor = 0.92 + ThreadLocalRandom.current().nextDouble() * 0.06;
+            double lagFactor = 0.92 + rng.nextDouble() * 0.06;
             base = new Vec3d(
                 prevAimX + (base.x - prevAimX) * lagFactor,
                 prevAimY + (base.y - prevAimY) * lagFactor,
                 prevAimZ + (base.z - prevAimZ) * lagFactor
             );
         }
-        prevAimX = base.x;
-        prevAimY = base.y;
-        prevAimZ = base.z;
-        hasPrevAim = true;
+        if (advanceInterpolation) {
+            prevAimX = base.x;
+            prevAimY = base.y;
+            prevAimZ = base.z;
+            hasPrevAim = true;
+        }
 
-        // Breathing/drift: REMOVED periodic sine/cosine (detectable patterns).
-        // Replaced with a single non-periodic micro-jitter.
-        double breathAmp = 0.001 + humanVariation.get() * 0.005;
+        // Breathing/drift: single non-periodic micro-jitter (FIX 3: applied once).
+        // FIX 12: recalibrated so the human-variation slider has a visible effect.
+        double breathAmp = 0.005 + humanVariation.get() * 0.05;
         base = base.add(
-            (ThreadLocalRandom.current().nextDouble() - 0.5) * breathAmp,
-            (ThreadLocalRandom.current().nextDouble() - 0.5) * breathAmp,
-            (ThreadLocalRandom.current().nextDouble() - 0.5) * breathAmp
+            (rng.nextDouble() - 0.5) * breathAmp,
+            (rng.nextDouble() - 0.5) * breathAmp,
+            (rng.nextDouble() - 0.5) * breathAmp
         );
 
         // Clamp final aim point inside the target hitbox (with small inner margin)
         // so the attack raycast actually connects instead of grazing the edge.
+        // FIX 15: margin scales down on tiny hitboxes so min <= max always holds.
+        double marginX = Math.min(0.05, (b.maxX - b.minX) * 0.4);
+        double marginY = Math.min(0.05, (b.maxY - b.minY) * 0.4);
+        double marginZ = Math.min(0.05, (b.maxZ - b.minZ) * 0.4);
         base = new Vec3d(
-            MathHelper.clamp(base.x, b.minX + 0.05, b.maxX - 0.05),
-            MathHelper.clamp(base.y, b.minY + 0.05, b.maxY - 0.05),
-            MathHelper.clamp(base.z, b.minZ + 0.05, b.maxZ - 0.05)
+            MathHelper.clamp(base.x, b.minX + marginX, b.maxX - marginX),
+            MathHelper.clamp(base.y, b.minY + marginY, b.maxY - marginY),
+            MathHelper.clamp(base.z, b.minZ + marginZ, b.maxZ - marginZ)
         );
         return base;
     }
 
-    private int getEffectivePredictionTicks() {
-        if (!prediction.get() || mc.player == null || target == null) return 0;
+    /**
+     * FIX 10: resolves {@link #currentAimPart}. A fixed setting is applied directly;
+     * {@link AimPart#Random} is rolled once and held for {@link #AIM_PART_REROLL_TICKS}
+     * ticks (or until the target changes) so the aim point does not jump every tick.
+     */
+    private AimPart resolveAimPart() {
+        AimPart setting = hitboxTarget.get();
+        if (setting != AimPart.Random) {
+            currentAimPart = setting;
+        } else if (aimPartTicks <= 0 || currentAimPart == AimPart.Random) {
+            currentAimPart = AimUtils.rollAimPart();
+            aimPartTicks   = AIM_PART_REROLL_TICKS;
+        } else {
+            aimPartTicks--;
+        }
+        return currentAimPart;
+    }
+
+    private int getEffectivePredictionTicks(Entity entity) {
+        // FIX 7: use the provided entity instead of the module-level target field.
+        if (!prediction.get() || mc.player == null || entity == null) return 0;
         int base = predictionTicks.get();
         int pingTicks = AimUtils.getPingTicks();
         int effective = base + pingTicks;
         // Reduce prediction for close targets (less needed, more detectable)
         try {
-            double dist = mc.player.getEyePos().distanceTo(target.getEntityPos());
+            double dist = mc.player.getEyePos().distanceTo(entity.getEntityPos());
             if (dist < 2.5) effective = Math.max(0, effective - 1);
             if (dist < 1.8) effective = 0;
         } catch (NullPointerException | IllegalStateException e) { /* ignore */ }
@@ -661,10 +660,21 @@ public class AdvancedAimAssist extends Module {
             float currentYaw   = mc.player.getYaw();
             float currentPitch = mc.player.getPitch();
 
-            // Isolate raw manual mouse delta
-            float manualDeltaYaw   = MathHelper.wrapDegrees(
-                (currentYaw   - prevAssistYaw)   - lastPlayerYaw);
-            float manualDeltaPitch = (currentPitch - prevAssistPitch) - lastPlayerPitch;
+            // FIX 1: capture tick-start rotation before any setYaw/setPitch below.
+            final float tickStartYaw   = currentYaw;
+            final float tickStartPitch = currentPitch;
+
+            // FIX 14: cache per-tick values reused across the tick.
+            final Vec3d eyePos     = mc.player.getEyePos();
+            final Vec3d startLook  = AimUtils.getLookVector(currentYaw, currentPitch);
+            final double rangeVal  = range.get();
+            final double escapeVal = escapeAngle.get();
+            final Random rng       = ThreadLocalRandom.current();
+
+            // FIX 1: isolate raw manual mouse delta (rotation at the start of this
+            // tick minus the rotation recorded at the start of the previous tick).
+            float manualDeltaYaw   = MathHelper.wrapDegrees(currentYaw - lastPlayerYaw);
+            float manualDeltaPitch = currentPitch - lastPlayerPitch;
 
             if (onlyWhenClicking.get() && (mc.options == null || !mc.options.attackKey.isPressed())) {
                 clearAssist(currentYaw, currentPitch); return;
@@ -676,17 +686,22 @@ public class AdvancedAimAssist extends Module {
             if (switchCooldownTicks > 0) switchCooldownTicks--;
             if (cycleTimer         > 0) cycleTimer--;
 
-            Entity found = findBestTarget();
+            // FIX 10: fix the aim part for this tick before target selection.
+            AimPart effectivePart = resolveAimPart();
+
+            Entity found = findBestTarget(rangeVal, escapeVal, eyePos, startLook, effectivePart);
             if (found != target && found != null) {
-                // Smooth transition between targets (flick-like but controlled)
-                prevTarget = target;
-                target = found;
-                inSwitchTransition = true;
-                switchTransitionTicks = SWITCH_TRANSITION_DURATION;
-                switchStartYaw = mc.player.getYaw();
-                switchStartPitch = mc.player.getPitch();
-                targetSwitchNs = System.nanoTime();
-                onTargetChanged();
+                // FIX 5: switchCooldownTicks gates new switches (sticky now holds
+                // the current target independently of the cooldown).
+                if (switchCooldownTicks <= 0) {
+                    // Smooth transition between targets (flick-like but controlled)
+                    target = found;
+                    inSwitchTransition = true;
+                    switchTransitionTicks = SWITCH_TRANSITION_DURATION;
+                    switchStartYaw = mc.player.getYaw();
+                    switchStartPitch = mc.player.getPitch();
+                    onTargetChanged();
+                }
             } else if (found == null) {
                 target = null;
                 inSwitchTransition = false;
@@ -701,30 +716,30 @@ public class AdvancedAimAssist extends Module {
                 lastPlayerYaw = currentYaw; lastPlayerPitch = currentPitch; return;
             }
 
-            float[] angles = getAimAngles(target);
+            // FIX 2: compute the aim point once per tick and derive angles from it.
+            Vec3d aimPoint = buildInterpolatedAimPoint(target);
+            if (aimPoint == null) { clearAssist(currentYaw, currentPitch); return; }
+            float[] angles = anglesFromPoint(aimPoint);
             if (angles == null) { clearAssist(currentYaw, currentPitch); return; }
 
             double wantedYaw   = angles[0];
             double wantedPitch = angles[1];
 
             // Pre-compute angle to target (used to gate overshoot / snap)
-            Vec3d eye0   = mc.player.getEyePos();
-            Vec3d point0 = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0);
-            Vec3d look0  = AimUtils.getLookVector(currentYaw, currentPitch);
-            double currentAngleToTarget = AimUtils.getAngle(look0, eye0, point0);
+            double currentAngleToTarget = AimUtils.getAngle(startLook, eyePos, aimPoint);
 
             // ── Micro-Overshoot Injection (2-4 ticks with decay) ─────────────
             // Disabled during target switch transitions for smoother flicks.
             if (microOvershoot.get() && !inSwitchTransition) {
                 double rawCheckDist = Math.abs(MathHelper.wrapDegrees(wantedYaw - currentYaw));
                 if (rawCheckDist > 20.0 && currentAngleToTarget > 12.0
-                        && overshootTicksLeft <= 0 && ThreadLocalRandom.current().nextDouble() < 0.15) {
-                    overshootTicksLeft = ThreadLocalRandom.current().nextInt(2, 3); // 2 ticks only
+                        && overshootTicksLeft <= 0 && rng.nextDouble() < 0.15) {
+                    overshootTicksLeft = rng.nextInt(2, 3); // 2 ticks only
                     overshootDuration  = overshootTicksLeft;
                     overshootYawOffset   = Math.signum(MathHelper.wrapDegrees(wantedYaw - currentYaw))
-                                         * ThreadLocalRandom.current().nextDouble(0.2, 0.5);
+                                         * rng.nextDouble(0.2, 0.5);
                     overshootPitchOffset = Math.signum(wantedPitch - currentPitch)
-                                         * ThreadLocalRandom.current().nextDouble(0.1, 0.3);
+                                         * rng.nextDouble(0.1, 0.3);
                 }
             }
             if (overshootTicksLeft > 0) {
@@ -738,30 +753,21 @@ public class AdvancedAimAssist extends Module {
             // Only attack ~60% of eligible ticks to simulate human hesitation.
             if (autoAttack.get() && mc.interactionManager != null
                 && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f
-                && ThreadLocalRandom.current().nextDouble() < 0.4) {
-                Vec3d eye   = mc.player.getEyePos();
-                Vec3d point = buildInterpolatedAimPoint(target);
-                if (point != null) {
-                    Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
-                    if (AimUtils.getAngle(look, eye, point) < 4.0) {
-                        mc.interactionManager.attackEntity(mc.player, target);
-                        mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
-                    }
+                && rng.nextDouble() < 0.4) {
+                // FIX 2: reuse the single aim point instead of recomputing it.
+                if (AimUtils.getAngle(startLook, eyePos, aimPoint) < 4.0) {
+                    mc.interactionManager.attackEntity(mc.player, target);
+                    mc.player.swingHand(net.minecraft.util.Hand.MAIN_HAND);
                 }
             }
 
-            // Escape angle
-            Vec3d eye   = mc.player.getEyePos();
-            Vec3d point = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0);
-            Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
-            // currentAngleToTarget already computed above
-
+            // Escape angle (currentAngleToTarget already computed above)
             boolean playerSteeringAway =
                 Math.abs(manualDeltaYaw) > 0.25f
                 && Math.signum(manualDeltaYaw) != Math.signum(
                       MathHelper.wrapDegrees(wantedYaw - currentYaw));
 
-            if (playerSteeringAway && currentAngleToTarget > escapeAngle.get()) {
+            if (playerSteeringAway && currentAngleToTarget > escapeVal) {
                 clearAssist(currentYaw, currentPitch); return;
             }
 
@@ -769,12 +775,14 @@ public class AdvancedAimAssist extends Module {
             if (humanVariation.get() > 0) {
                 double dt = 1.0 / 20.0;
                 double theta = 1.5;
-                double sigma = humanVariation.get() * 0.06;
+                double sigma = humanVariation.get() * 0.6; // FIX 12: was * 0.06
                 double sqrtDt = Math.sqrt(dt);
-                tremorYaw   += -theta * tremorYaw   * dt + sigma * ThreadLocalRandom.current().nextGaussian() * sqrtDt;
-                tremorPitch += -theta * tremorPitch * dt + sigma * 0.6 * ThreadLocalRandom.current().nextGaussian() * sqrtDt;
-                tremorYaw   = MathHelper.clamp(tremorYaw,   -humanVariation.get() * 0.5, humanVariation.get() * 0.5);
-                tremorPitch = MathHelper.clamp(tremorPitch, -humanVariation.get() * 0.5, humanVariation.get() * 0.5);
+                tremorYaw   += -theta * tremorYaw   * dt + sigma * rng.nextGaussian() * sqrtDt;
+                tremorPitch += -theta * tremorPitch * dt + sigma * 0.6 * rng.nextGaussian() * sqrtDt;
+                // FIX 12: clamp widened from * 0.5 to * 2.0
+                double tremorMax = humanVariation.get() * 2.0;
+                tremorYaw   = MathHelper.clamp(tremorYaw,   -tremorMax, tremorMax);
+                tremorPitch = MathHelper.clamp(tremorPitch, -tremorMax, tremorMax);
                 // Tremor: minimal contribution. Large tremor creates detectable jitter.
                 wantedYaw   += tremorYaw * 0.1;
                 wantedPitch  = MathHelper.clamp(wantedPitch + tremorPitch * 0.1, -90.0, 90.0);
@@ -814,7 +822,7 @@ public class AdvancedAimAssist extends Module {
             // don't move the mouse every 50 ms). ~12% of ticks.
             if (skipTickCounter > 0) {
                 skipTickCounter--;
-            } else if (ThreadLocalRandom.current().nextDouble() < 0.015) {
+            } else if (rng.nextDouble() < 0.015) {
                 skipTickCounter = 1;
                 lastPlayerYaw = currentYaw;
                 lastPlayerPitch = currentPitch;
@@ -845,8 +853,7 @@ public class AdvancedAimAssist extends Module {
             float targetAngularSpeedYaw = 0f, targetAngularSpeedPitch = 0f;
             if (target != null) {
                 Vec3d vel    = target.getVelocity();
-                Vec3d eyePos = mc.player.getEyePos();
-                Vec3d dir    = AimUtils.getAimPoint(target, hitboxTarget.get(), false, 0).subtract(eyePos);
+                Vec3d dir    = aimPoint.subtract(eyePos);
                 double dist  = dir.length();
                 if (dist > 0.01) {
                     Vec3d dirN  = dir.normalize();
@@ -877,7 +884,7 @@ public class AdvancedAimAssist extends Module {
 
             // Visual naturalness: per-tick speed variation (humans don't move
             // at constant speed). ±15% jitter on the step magnitude.
-            double speedJitter = 0.99 + ThreadLocalRandom.current().nextDouble() * 0.02;
+            double speedJitter = 0.99 + rng.nextDouble() * 0.02;
             finalStepYaw   = (float) (finalStepYaw   * speedJitter);
             finalStepPitch = (float) (finalStepPitch * speedJitter);
 
@@ -910,7 +917,7 @@ public class AdvancedAimAssist extends Module {
             // Micro-snap: minimal residual. The ease-out-cubic already decelerates
             // naturally; a large snapFactor creates detectable "hovering".
             if (absYaw < 1.5 && absPitch < 1.5) {
-                double snapFactor = 0.88 + ThreadLocalRandom.current().nextDouble() * 0.10;
+                double snapFactor = 0.88 + rng.nextDouble() * 0.10;
                 finalStepYaw   = (float) (absYaw   * snapFactor);
                 finalStepPitch = (float) (absPitch * snapFactor);
             }
@@ -920,11 +927,11 @@ public class AdvancedAimAssist extends Module {
 
             // Anti-cheat: tiny non-periodic noise (before GCD, so it gets
             // absorbed into gcd alignment). Very small to avoid step flipping.
-            if (ThreadLocalRandom.current().nextDouble() < 0.2) {
-                yawStep += (ThreadLocalRandom.current().nextFloat() - 0.5f) * 0.0005f;
+            if (rng.nextDouble() < 0.2) {
+                yawStep += (rng.nextFloat() - 0.5f) * 0.0005f;
             }
-            if (ThreadLocalRandom.current().nextDouble() < 0.15) {
-                pitchStep += (ThreadLocalRandom.current().nextFloat() - 0.5f) * 0.0003f;
+            if (rng.nextDouble() < 0.15) {
+                pitchStep += (rng.nextFloat() - 0.5f) * 0.0003f;
             }
 
             // GCD quantisation (post-step) — ALWAYS when gcdFix enabled
@@ -941,7 +948,6 @@ public class AdvancedAimAssist extends Module {
             // longer a multiple of gcd, which Grim/Vulcan detect instantly.
             // Smoothing is instead applied to the aim POINT before rotation
             // calculation, keeping the rotation GCD-aligned.
-            // (emaYaw/emaPitch fields retained for compatibility but unused)
 
             if (!Float.isFinite(finalYaw) || !Float.isFinite(finalPitch)) {
                 clearAssist(currentYaw, currentPitch); return;
@@ -959,10 +965,10 @@ public class AdvancedAimAssist extends Module {
                 }
             }
 
-            prevAssistYaw   = yawStep;
-            prevAssistPitch = pitchStep;
-            lastPlayerYaw   = mc.player.getYaw();
-            lastPlayerPitch = mc.player.getPitch();
+            // FIX 1: record the tick-START rotation (manual input reference),
+            // not the final rotated yaw/pitch.
+            lastPlayerYaw   = tickStartYaw;
+            lastPlayerPitch = tickStartPitch;
 
         } catch (NullPointerException e) {
             LOG.error("NPE in aim assist tick", e);
@@ -981,8 +987,8 @@ public class AdvancedAimAssist extends Module {
 
     private void clearAssist(float y, float p) {
         hasPrevAim     = false;
-        prevAssistYaw   = 0f;
-        prevAssistPitch = 0f;
+        // FIX 1: keep lastPlayerYaw/Pitch in sync with the player's current
+        // rotation (the values passed in), never reset to zero.
         lastPlayerYaw   = y;
         lastPlayerPitch = p;
         target          = null;
@@ -1001,12 +1007,18 @@ public class AdvancedAimAssist extends Module {
 
     // ------------------------------------------------------------------ targeting
     private void onTargetChanged() {
+        // FIX 9: drop jerk-limiter and overshoot state carried over from the old target.
+        prevStepYaw        = 0f;
+        prevStepPitch      = 0f;
+        overshootTicksLeft = 0;
+        overshootDuration  = 0;
+        // FIX 10: re-roll the random aim part for the new target.
+        aimPartTicks   = 0;
+        resolveAimPart();
         hasPrevAim     = false;
         trackStartNs   = 0L;
         fatigueTicks   = 0;
         switchCooldownTicks = switchCooldown.get();
-        prevAssistYaw       = 0f;
-        prevAssistPitch     = 0f;
         if (!realisticTiming.get() || target == null) {
             reactionReadyAt = 0L;
         } else {
@@ -1017,16 +1029,23 @@ public class AdvancedAimAssist extends Module {
         }
     }
 
-    private Entity findBestTarget() {
+    // FIX 14: per-tick values (range, escape angle, eye, look, aim part) are passed in
+    // so no setting is read inside the entity loop or the comparator.
+    private Entity findBestTarget(double rangeVal, double escapeVal, Vec3d eye, Vec3d look, AimPart part) {
         try {
-            if (sticky.get() && target != null && isValidStickyTarget(target) && switchCooldownTicks > 0) {
+            // FIX 19: force a cache refresh when there is no target yet (fast acquisition).
+            if (target == null) targetCacheAge = 0;
+
+            // FIX 5: sticky holds the target as long as it stays valid/unlocked.
+            if (sticky.get() && target != null && isValidStickyTarget(target, rangeVal, escapeVal, eye, look, part)) {
                 return target;
             }
 
-        Vec3d  eye     = mc.player.getEyePos();
-        Vec3d  look    = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
-        double halfFov = fov.get() / 2.0;
-        boolean useFov = fov.get() < 360.0;
+        final double  fovVal          = fov.get();
+        final double  halfFov         = fovVal / 2.0;
+        final boolean useFov          = fovVal < 360.0;
+        final boolean throughWallsVal = throughWalls.get();
+        final TargetPriority prio     = priority.get();
 
         // Cache the world entity list for a couple of ticks to reduce allocations/iteration
         if (targetCacheAge <= 0 || targetEntityCache.isEmpty()) {
@@ -1045,12 +1064,12 @@ public class AdvancedAimAssist extends Module {
         for (int i = 0; i < cacheSize; i++) {
             Entity entity = targetEntityCache.get(i);
             if (!isValidTarget(entity)) continue;
-            Vec3d  point    = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
+            Vec3d  point    = AimUtils.getAimPoint(entity, part, false, 0); // FIX 10/14
             double distance = eye.distanceTo(point);
-            if (distance > range.get()) continue;
+            if (distance > rangeVal) continue;
             double angle = AimUtils.getAngle(look, eye, point);
             if (useFov && angle > halfFov) continue;
-            if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
+            if (!throughWallsVal && !AimUtils.hasLineOfSight(eye, point, entity)) continue;
 
             float health = AimUtils.getHealth(entity);
             targetCache.add(new AimTarget(entity, point, distance, angle, health));
@@ -1058,23 +1077,17 @@ public class AdvancedAimAssist extends Module {
 
         if (targetCache.isEmpty()) return null;
 
-        // Multi-target: threat-based scoring for smarter selection.
-        // Combines distance, angle, health and a proximity bonus so the
-        // most dangerous enemy is preferred, not just the closest.
-        targetCache.sort((t1, t2) -> {
-            double score1 = computeThreatScore(t1);
-            double score2 = computeThreatScore(t2);
-            return switch (priority.get()) {
-                case LowestHealth -> {
-                    int c = Float.compare(t1.health(), t2.health());
-                    yield c != 0 ? c : Double.compare(score1, score2);
-                }
-                case Angle -> {
-                    int c = Double.compare(t1.angle(), t2.angle());
-                    yield c != 0 ? c : Double.compare(score1, score2);
-                }
-                default -> Double.compare(score1, score2);
-            };
+        // FIX 4: rank by the selected priority, with distance as the tie-breaker.
+        targetCache.sort((t1, t2) -> switch (prio) {
+            case Closest -> Double.compare(t1.distance(), t2.distance());
+            case LowestHealth -> {
+                int c = Float.compare(t1.health(), t2.health());
+                yield c != 0 ? c : Double.compare(t1.distance(), t2.distance());
+            }
+            case Angle -> {
+                int c = Double.compare(t1.angle(), t2.angle());
+                yield c != 0 ? c : Double.compare(t1.distance(), t2.distance());
+            }
         });
 
         if (multiTarget.get() && multiTargetMode.get() == MultiTargetMode.Cycle && targetCache.size() > 1) {
@@ -1100,40 +1113,35 @@ public class AdvancedAimAssist extends Module {
         }
     }
 
-    /**
-     * Threat score for multi-target prioritisation.
-     * Lower = more dangerous. Combines distance, angle, health and a
-     * proximity bonus so the most threatening enemy is preferred.
-     */
-    private double computeThreatScore(AimTarget t) {
-        double distNorm = t.distance() / Math.max(range.get(), 0.1);
-        double angleNorm = t.angle() / 180.0;
-        double healthNorm = t.health() / 40.0; // normalise to ~40 HP
-        // Weighted: distance 40%, angle 30%, health 20%, proximity bonus 10%
-        double proximityBonus = t.distance() < 3.0 ? 0.15 : 0.0;
-        return distNorm * 0.40 + angleNorm * 0.30 + healthNorm * 0.20 - proximityBonus;
-    }
-
+    // FIX 6: accept any LivingEntity; players always, villagers/wandering traders
+    // only with target-npcs, everything else only when listed in `entities`.
     private boolean isValidTarget(Entity entity) {
         if (entity == null || entity == mc.player || entity == mc.getCameraEntity()) return false;
-        if (!(entity instanceof PlayerEntity player)) return false;
-        if (player.isSpectator() || player.isCreative()) return false;
+        if (!(entity instanceof LivingEntity)) return false;
         if (entity.isRemoved() || AimUtils.isDead(entity)) return false;
         if (ignoreInvisible.get() && entity.isInvisible()) return false;
-        if (!entities.get().isEmpty() && !entities.get().contains(entity.getType())) return false;
-        if (ignoreFriends.get() && !Friends.get().shouldAttack(player)) return false;
-        return true;
+        Set<EntityType<?>> types = entities.get();
+        if (!types.isEmpty() && !types.contains(entity.getType())) return false;
+
+        if (entity instanceof PlayerEntity player) {
+            if (player.isSpectator() || player.isCreative()) return false;
+            return !ignoreFriends.get() || Friends.get().shouldAttack(player);
+        }
+        if (entity instanceof VillagerEntity || entity instanceof WanderingTraderEntity) {
+            return targetNpcs.get();
+        }
+        // Monsters / other mobs: only when explicitly selected in `entities`
+        return !types.isEmpty();
     }
 
-    private boolean isValidStickyTarget(Entity entity) {
+    private boolean isValidStickyTarget(Entity entity, double rangeVal, double escapeVal,
+                                        Vec3d eye, Vec3d look, AimPart part) {
         if (!isValidTarget(entity)) return false;
-        Vec3d  eye   = mc.player.getEyePos();
-        Vec3d  point = AimUtils.getAimPoint(entity, hitboxTarget.get(), false, 0);
-        double eff   = Math.max(unlockRange.get(), range.get() + 0.5);
+        Vec3d  point = AimUtils.getAimPoint(entity, part, false, 0); // FIX 10
+        double eff   = Math.max(unlockRange.get(), rangeVal + 0.5);
         if (eye.distanceTo(point) > eff) return false;
         if (!throughWalls.get() && !AimUtils.hasLineOfSight(eye, point, entity)) return false;
-        Vec3d look = AimUtils.getLookVector(mc.player.getYaw(), mc.player.getPitch());
-        return AimUtils.getAngle(look, eye, point) <= escapeAngle.get();
+        return AimUtils.getAngle(look, eye, point) <= escapeVal;
     }
 
     private void renderTargetCircle(Render3DEvent event) {
@@ -1184,6 +1192,7 @@ public class AdvancedAimAssist extends Module {
 
     @Override
     public String getInfoString() {
-        return target != null ? AimUtils.getName(target) : null;
+        // FIX 18: never return null from getInfoString.
+        return target != null ? AimUtils.getName(target) : "";
     }
 }

@@ -3,10 +3,6 @@ package com.advancedaimassist.utils;
 import meteordevelopment.meteorclient.utils.entity.EntityUtils;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.mob.Monster;
-import net.minecraft.entity.passive.VillagerEntity;
-import net.minecraft.entity.passive.WanderingTraderEntity;
-import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.Box;
@@ -26,11 +22,6 @@ public final class AimUtils {
     private AimUtils() {
     }
 
-    public static boolean isValidTargetType(Entity entity, boolean targetNpcs) {
-        if (entity instanceof PlayerEntity || entity instanceof Monster) return true;
-        return targetNpcs && (entity instanceof VillagerEntity || entity instanceof WanderingTraderEntity);
-    }
-
     public static boolean isDead(Entity entity) {
         if (!entity.isAlive() || entity.isRemoved()) return true;
         return entity instanceof LivingEntity living && (living.isDead() || living.getHealth() <= 0);
@@ -48,13 +39,7 @@ public final class AimUtils {
         double z = (box.minZ + box.maxZ) / 2.0;
         double height = box.maxY - box.minY;
 
-        AimPart actualPart = part;
-        if (actualPart == AimPart.Random) {
-            double r = ThreadLocalRandom.current().nextDouble();
-            if (r < 0.6) actualPart = AimPart.Body;
-            else if (r < 0.9) actualPart = AimPart.Head;
-            else actualPart = AimPart.Feet;
-        }
+        AimPart actualPart = part == AimPart.Random ? rollAimPart() : part;
 
         double y = switch (actualPart) {
             case Head -> box.maxY - height * 0.15;
@@ -71,6 +56,17 @@ public final class AimUtils {
         }
 
         return point;
+    }
+
+    /**
+     * Weighted random aim part (favoring center-mass Body). Callers that want a
+     * stable part across ticks should roll once and cache the result.
+     */
+    public static AimPart rollAimPart() {
+        double r = ThreadLocalRandom.current().nextDouble();
+        if (r < 0.6) return AimPart.Body;
+        if (r < 0.9) return AimPart.Head;
+        return AimPart.Feet;
     }
 
     public static double getYaw(Vec3d from, Vec3d to) {
@@ -150,7 +146,9 @@ public final class AimUtils {
             if (mc.player == null || mc.getNetworkHandler() == null) return 0;
             PlayerListEntry entry = mc.getNetworkHandler().getPlayerListEntry(mc.player.getUuid());
             if (entry == null) return 0;
-            return (int) Math.round(entry.getLatency() / 50.0);
+            // FIX 16: clamp latency-derived ticks to a sane upper bound.
+            int ticks = (int) Math.round(entry.getLatency() / 50.0);
+            return MathHelper.clamp(ticks, 0, 5);
         } catch (NullPointerException | IllegalStateException e) {
             return 0;
         }
