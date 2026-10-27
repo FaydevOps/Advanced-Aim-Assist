@@ -13,6 +13,9 @@ import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.client.network.PlayerListEntry;
+
+import java.util.UUID;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -136,5 +139,35 @@ public final class AimUtils {
 
     public static String getName(Entity entity) {
         return entity.getName().getString();
+    }
+
+    /**
+     * Ping compensation helper: converts the player's network latency to an
+     * equivalent number of ticks (20 TPS). Used to adjust prediction lookahead.
+     */
+    public static int getPingTicks() {
+        try {
+            if (mc.player == null || mc.getNetworkHandler() == null) return 0;
+            PlayerListEntry entry = mc.getNetworkHandler().getPlayerListEntry(mc.player.getUuid());
+            if (entry == null) return 0;
+            return (int) Math.round(entry.getLatency() / 50.0);
+        } catch (NullPointerException | IllegalStateException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Simple parabolic vertical prediction for falling targets.
+     * Simulates Minecraft gravity (~0.08/tick) and drag (~0.98) over {@code ticks}.
+     */
+    public static double predictVerticalOffset(double velocityY, int ticks) {
+        double y = 0.0;
+        double vy = velocityY;
+        for (int i = 0; i < ticks; i++) {
+            y += vy;
+            vy -= 0.08;   // gravity (applyGravity approx)
+            vy *= 0.98;   // drag
+        }
+        return y;
     }
 }
