@@ -367,6 +367,15 @@ public class AdvancedAimAssist extends Module {
     private double  prevRawYaw  = 0.0;
     private double  prevRawPitch = 0.0;
 
+    // Multi-target transition state
+    private Entity  prevTarget   = null;
+    private long    targetSwitchNs = 0L;
+    private float   switchStartYaw   = 0f;
+    private float   switchStartPitch = 0f;
+    private boolean inSwitchTransition = false;
+    private int     switchTransitionTicks = 0;
+    private static final int SWITCH_TRANSITION_DURATION = 6; // ticks to blend between targets
+
     // Anti-cheat (Grim/Vulcan) safety state
     private float   prevStepYaw   = 0f;
     private float   prevStepPitch = 0f;
@@ -414,6 +423,10 @@ public class AdvancedAimAssist extends Module {
         flickTimer         = 0.0;
         prevRawYaw         = 0.0;
         prevRawPitch       = 0.0;
+        prevTarget         = null;
+        targetSwitchNs     = 0L;
+        inSwitchTransition = false;
+        switchTransitionTicks = 0;
         targetCache.clear();
         targetEntityCache.clear();
         targetCacheAge     = 0;
@@ -656,7 +669,20 @@ public class AdvancedAimAssist extends Module {
             if (cycleTimer         > 0) cycleTimer--;
 
             Entity found = findBestTarget();
-            if (found != target) { target = found; onTargetChanged(); }
+            if (found != target && found != null) {
+                // Smooth transition between targets (flick-like but controlled)
+                prevTarget = target;
+                target = found;
+                inSwitchTransition = true;
+                switchTransitionTicks = SWITCH_TRANSITION_DURATION;
+                switchStartYaw = mc.player.getYaw();
+                switchStartPitch = mc.player.getPitch();
+                targetSwitchNs = System.nanoTime();
+                onTargetChanged();
+            } else if (found == null) {
+                target = null;
+                inSwitchTransition = false;
+            }
 
             if (target == null) { clearAssist(currentYaw, currentPitch); return; }
 
@@ -680,9 +706,8 @@ public class AdvancedAimAssist extends Module {
             double currentAngleToTarget = AimUtils.getAngle(look0, eye0, point0);
 
             // ── Micro-Overshoot Injection (2-4 ticks with decay) ─────────────
-            // Only overshoot on large snaps far from the hitbox; never when already
-            // on-target, otherwise shots get dropped.
-            if (microOvershoot.get()) {
+            // Disabled during target switch transitions for smoother flicks.
+            if (microOvershoot.get() && !inSwitchTransition) {
                 double rawCheckDist = Math.abs(MathHelper.wrapDegrees(wantedYaw - currentYaw));
                 if (rawCheckDist > 20.0 && currentAngleToTarget > 12.0
                         && overshootTicksLeft <= 0 && ThreadLocalRandom.current().nextDouble() < 0.15) {
@@ -757,6 +782,21 @@ public class AdvancedAimAssist extends Module {
                 clearAssist(currentYaw, currentPitch); return;
             }
 
+            // Multi-target: transition factor (0→1 over SWITCH_TRANSITION_DURATION ticks)
+            double transitionFactor = 1.0;
+            if (inSwitchTransition) {
+                switchTransitionTicks--;
+                if (switchTransitionTicks <= 0) {
+                    inSwitchTransition = false;
+                } else {
+                    transitionFactor = 1.0 - (switchTransitionTicks / (double) SWITCH_TRANSITION_DURATION);
+                    // Ease-in: start slow, accelerate (human flick pattern)
+                    transitionFactor = transitionFactor * transitionFactor;
+                    // Clamp minimum to avoid stalling
+                    transitionFactor = Math.max(transitionFactor, 0.3);
+                }
+            }
+
             // Visual naturalness + anti-cheat: occasionally skip a tick (humans
             // don't move the mouse every 50 ms). ~12% of ticks.
             if (skipTickCounter > 0) {
@@ -785,8 +825,8 @@ public class AdvancedAimAssist extends Module {
             double expFactorYaw   = Math.max(easeYaw,   0.10);
             double expFactorPitch = Math.max(easePitch, 0.10);
 
-            double stepY = maxYawTick   * expFactorYaw   * (0.65 + 0.35 * glue) * (1.0 - smooth * 0.25) * synergyFactor;
-            double stepP = maxPitchTick * expFactorPitch * (0.60 + 0.40 * glue) * (1.0 - (smooth * 1.20) * 0.25) * synergyFactor;
+            double stepY = maxYawTick   * expFactorYaw   * (0.65 + 0.35 * glue) * (1.0 - smooth * 0.25) * synergyFactor * transitionFactor;
+            double stepP = maxPitchTick * expFactorPitch * (0.60 + 0.40 * glue) * (1.0 - (smooth * 1.20) * 0.25) * synergyFactor * transitionFactor;
 
             // Velocity floor for target tracking
             float targetAngularSpeedYaw = 0f, targetAngularSpeedPitch = 0f;
@@ -1007,10 +1047,23 @@ public class AdvancedAimAssist extends Module {
 
         if (targetCache.isEmpty()) return null;
 
-        targetCache.sort((t1, t2) -> switch (priority.get()) {
-            case LowestHealth -> Float.compare(t1.health(), t2.health());
-            case Angle        -> Double.compare(t1.angle(), t2.angle());
-            default           -> Double.compare(t1.distance(), t2.distance());
+        // Multi-target: threat-based scoring for smarter selection.
+        // Combines distance, angle, health and a proximity bonus so the
+        // most dangerous enemy is preferred, not just the closest.
+        targetCache.sort((t1, t2) -> {
+            double score1 = computeThreatScore(t1);
+            double score2 = computeThreatScore(t2);
+            return switch (priority.get()) {
+                case LowestHealth -> {
+                    int c = Float.compare(t1.health(), t2.health());
+                    yield c != 0 ? c : Double.compare(score1, score2);
+                }
+                case Angle -> {
+                    int c = Double.compare(t1.angle(), t2.angle());
+                    yield c != 0 ? c : Double.compare(score1, score2);
+                }
+                default -> Double.compare(score1, score2);
+            };
         });
 
         if (multiTarget.get() && multiTargetMode.get() == MultiTargetMode.Cycle && targetCache.size() > 1) {
@@ -1030,6 +1083,20 @@ public class AdvancedAimAssist extends Module {
         }
 
         return targetCache.get(0).entity();
+    }
+
+    /**
+     * Threat score for multi-target prioritisation.
+     * Lower = more dangerous. Combines distance, angle, health and a
+     * proximity bonus so the most threatening enemy is preferred.
+     */
+    private double computeThreatScore(AimTarget t) {
+        double distNorm = t.distance() / Math.max(range.get(), 0.1);
+        double angleNorm = t.angle() / 180.0;
+        double healthNorm = t.health() / 40.0; // normalise to ~40 HP
+        // Weighted: distance 40%, angle 30%, health 20%, proximity bonus 10%
+        double proximityBonus = t.distance() < 3.0 ? 0.15 : 0.0;
+        return distNorm * 0.40 + angleNorm * 0.30 + healthNorm * 0.20 - proximityBonus;
     }
 
     private boolean isValidTarget(Entity entity) {
