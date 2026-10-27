@@ -1,5 +1,5 @@
 <img width="128" height="128" alt="logo" src="https://github.com/user-attachments/assets/57855f35-c6f4-4e9d-b128-d663deb09ad3" />
-# Advanced Aim Assist (DemonClient v2.2 Legit Edition)
+# Advanced Aim Assist ( Legit Editition
 
 An advanced, pro-grade ghost client aim assist addon for [Meteor Client](https://meteorclient.com), built on the Fabric addon API. Designed specifically for strict anti-cheat bypass (Grim, Vulcan) and 100% natural, humanized PvP combat performance.
 
