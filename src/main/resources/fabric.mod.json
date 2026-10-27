@@ -8,7 +8,7 @@
     "FaydevOps"
   ],
   "contact": {
-    "sources": "https://github.com/FaydevOps/meteor-addon-aimassit"
+    "sources": "https://github.com/FaydevOps/Advanced-Aim-Assist"
   },
   "icon": "assets/advanced-aim-assist/icon.png",
   "environment": "client",
