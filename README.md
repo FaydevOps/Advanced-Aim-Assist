@@ -9,7 +9,7 @@ An advanced, pro-grade ghost client aim assist addon for
 [![Fabric](https://img.shields.io/badge/Fabric%20Loader-0.18.2-DBB69A?style=flat-square)](https://fabricmc.net)
 [![Meteor](https://img.shields.io/badge/Meteor-1.21.11--SNAPSHOT-9146FF?style=flat-square)](https://meteorclient.com)
 [![JDK](https://img.shields.io/badge/JDK-21-orange?style=flat-square)](https://adoptium.net)
-[![License: CC0](https://img.shields.io/badge/License-CC0-lightgrey?style=flat-square)](LICENSE)
+[![License: GPL](https://www.gnu.org/licenses/why-not-lgpl.html)](LICENSE)
 
 [![GitHub Stars](https://img.shields.io/github/stars/FaydevOps/Advanced-Aim-Assist?style=flat-square&color=yellow)](https://github.com/FaydevOps/Advanced-Aim-Assist/stargazers)
 [![GitHub Issues](https://img.shields.io/github/issues/FaydevOps/Advanced-Aim-Assist?style=flat-square)](https://github.com/FaydevOps/Advanced-Aim-Assist/issues)
