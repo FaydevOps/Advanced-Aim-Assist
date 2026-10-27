@@ -534,7 +534,7 @@ public class AdvancedAimAssist extends Module {
             Box    box    = entity.getBoundingBox();
             double width  = box.maxX - box.minX;
             double height = box.maxY - box.minY;
-            double t      = (System.nanoTime() / 1_000_000_000.0) * 2.2;
+            double t      = (System.nanoTime() / 1_000_000_000.0) * (1.8 + ThreadLocalRandom.current().nextDouble() * 0.8);
 
             double ox = Math.sin(t * 2.3) * width  * 0.05 * hitboxRoaming.get();
             double oz = Math.cos(t * 1.8) * width  * 0.05 * hitboxRoaming.get();
@@ -592,7 +592,7 @@ public class AdvancedAimAssist extends Module {
 
         // --- Ghost aim: breathing simulation (vertical micro-oscillation) ---
         // Humans breathe; the crosshair bobs slightly up/down over time.
-        breathPhase += 0.08 + ThreadLocalRandom.current().nextDouble() * 0.04;
+        breathPhase += 0.03 + ThreadLocalRandom.current().nextDouble() * 0.12;
         double breathAmp = 0.001 + humanVariation.get() * 0.008;
         double breathOffset = Math.sin(breathPhase) * breathAmp;
         base = base.add(0, breathOffset, 0);
@@ -600,7 +600,7 @@ public class AdvancedAimAssist extends Module {
         // --- Ghost aim: organic drift (slow circular movement around target) ---
         // The crosshair doesn't stay perfectly still; it drifts in a slow
         // circle around the aim point, mimicking hand instability.
-        driftPhase += 0.05 + ThreadLocalRandom.current().nextDouble() * 0.03;
+        driftPhase += 0.02 + ThreadLocalRandom.current().nextDouble() * 0.08;
         double driftRadius = 0.001 + humanVariation.get() * 0.006;
         Box b2 = entity.getBoundingBox();
         double boxW = b2.maxX - b2.minX;
@@ -619,10 +619,16 @@ public class AdvancedAimAssist extends Module {
     }
 
     private int getEffectivePredictionTicks() {
-        if (!prediction.get()) return 0;
+        if (!prediction.get() || mc.player == null || target == null) return 0;
         int base = predictionTicks.get();
         int pingTicks = AimUtils.getPingTicks();
         int effective = base + pingTicks;
+        // Reduce prediction for close targets (less needed, more detectable)
+        try {
+            double dist = mc.player.getEyePos().distanceTo(target.getEntityPos());
+            if (dist < 2.5) effective = Math.max(0, effective - 1);
+            if (dist < 1.8) effective = 0;
+        } catch (NullPointerException | IllegalStateException e) { /* ignore */ }
         return MathHelper.clamp(effective, 0, 5);
     }
 
@@ -726,9 +732,11 @@ public class AdvancedAimAssist extends Module {
                 overshootTicksLeft--;
             }
 
-            // Auto-attack
+            // Auto-attack: add random delay to avoid mechanical attack patterns.
+            // Only attack ~60% of eligible ticks to simulate human hesitation.
             if (autoAttack.get() && mc.interactionManager != null
-                && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f) {
+                && mc.player.getAttackCooldownProgress(0.5f) >= 1.0f
+                && ThreadLocalRandom.current().nextDouble() < 0.6) {
                 Vec3d eye   = mc.player.getEyePos();
                 Vec3d point = buildInterpolatedAimPoint(target);
                 Vec3d look  = AimUtils.getLookVector(currentYaw, currentPitch);
@@ -844,8 +852,10 @@ public class AdvancedAimAssist extends Module {
                 }
             }
 
-            float floorYaw   = Math.max(targetAngularSpeedYaw,   0.20f) * (float) (0.7 + 0.3 * glue);
-            float floorPitch = Math.max(targetAngularSpeedPitch, 0.12f) * (float) (0.7 + 0.3 * glue);
+            // Reduced velocity floor: perfect strafe-tracking is a detection vector.
+            // Use a much lower floor so the aim doesn't lock onto lateral movement.
+            float floorYaw   = Math.max(targetAngularSpeedYaw * 0.3f, 0.10f) * (float) (0.5 + 0.2 * glue);
+            float floorPitch = Math.max(targetAngularSpeedPitch * 0.3f, 0.06f) * (float) (0.5 + 0.2 * glue);
 
             float finalStepYaw   = (float) Math.max(stepY, floorYaw);
             float finalStepPitch = (float) Math.max(stepP, floorPitch);
@@ -857,12 +867,14 @@ public class AdvancedAimAssist extends Module {
             finalStepPitch = (float) Math.min(finalStepPitch, absPitch);
 
             // Micro-magnetism inside hitbox (<6°)
-            if (microMagnetism.get() > 0.0 && absYaw < 8.0) {
-                double mag = (1.0 - absYaw / 8.0) * microMagnetism.get() * 0.12;
+            // Micro-magnetism: heavily reduced. The "pull to center" pattern is
+            // a known detection vector for Grim/Vulcan (snap-to-center).
+            if (microMagnetism.get() > 0.0 && absYaw < 4.0 && ThreadLocalRandom.current().nextDouble() < 0.3) {
+                double mag = (1.0 - absYaw / 4.0) * microMagnetism.get() * 0.06;
                 finalStepYaw += finalStepYaw * mag;
             }
-            if (microMagnetism.get() > 0.0 && absPitch < 6.0) {
-                double mag = (1.0 - absPitch / 6.0) * microMagnetism.get() * 0.12;
+            if (microMagnetism.get() > 0.0 && absPitch < 3.0 && ThreadLocalRandom.current().nextDouble() < 0.3) {
+                double mag = (1.0 - absPitch / 3.0) * microMagnetism.get() * 0.06;
                 finalStepPitch += finalStepPitch * mag;
             }
 
@@ -907,6 +919,15 @@ public class AdvancedAimAssist extends Module {
             float yawStep   = finalStepYaw   * (float) Math.signum(rawDeltaYaw);
             float pitchStep = finalStepPitch * (float) Math.signum(rawDeltaPitch);
 
+            // Anti-cheat: add tiny non-periodic noise to break mechanical patterns.
+            // Grim/Vulcan detect overly consistent rotation deltas.
+            if (ThreadLocalRandom.current().nextDouble() < 0.4) {
+                yawStep += (ThreadLocalRandom.current().nextFloat() - 0.5f) * 0.002f;
+            }
+            if (ThreadLocalRandom.current().nextDouble() < 0.3) {
+                pitchStep += (ThreadLocalRandom.current().nextFloat() - 0.5f) * 0.0015f;
+            }
+
             // GCD quantisation (post-step) — ALWAYS when gcdFix enabled
             if (gcdFix.get()) {
                 yawStep   = (float) (RotationUtils.applyGCD(currentYaw,   currentYaw   + yawStep)   - currentYaw);
@@ -920,7 +941,7 @@ public class AdvancedAimAssist extends Module {
             // Smoothing the delta (speed) instead of absolute position prevents
             // lag when the target moves fast, while still looking smooth.
             if (hasEma) {
-                double alpha = 0.50 + ThreadLocalRandom.current().nextDouble() * 0.15;
+                double alpha = 0.40 + ThreadLocalRandom.current().nextDouble() * 0.25;
                 emaYaw   = emaYaw   + (yawStep   - emaYaw)   * alpha;
                 emaPitch = emaPitch + (pitchStep - emaPitch) * alpha;
                 yawStep   = (float) emaYaw;

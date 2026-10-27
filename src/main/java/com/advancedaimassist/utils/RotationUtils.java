@@ -15,7 +15,8 @@ public final class RotationUtils {
 
         float sensitivity = (float) (mc.options.getMouseSensitivity().getValue() * 0.6 + 0.2);
         double gcd = sensitivity * sensitivity * sensitivity * 1.2;
-        if (gcd <= 0.0001) return target;
+        // Clamp gcd to a sane range to avoid extreme quantization
+        if (gcd <= 0.0001 || gcd > 1.0) return target;
 
         double delta = MathHelper.wrapDegrees(target - current);
         double count = Math.round(delta / gcd);
