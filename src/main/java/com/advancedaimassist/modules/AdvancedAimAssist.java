@@ -39,7 +39,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * AdvancedAimAssist — DemonClient v2.2 (refactored)
+ * AdvancedAimAssist — (refactored)
  *
  * Changes vs original:
  *  - Exponential ease-out replaced by ease-out-cubic curve for smoother deceleration.
