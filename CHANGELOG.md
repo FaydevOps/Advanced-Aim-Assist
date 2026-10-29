@@ -1,5 +1,29 @@
 # CHANGELOG — Advanced-Aim-Assist (DemonClient v2.2)
 
+## Rotation naturalness pass (visual legitimacy)
+
+### Trajectory
+- Per-flick asymmetric ease powers: one axis leads, the other lags, so the
+  approach traces a curved wrist arc instead of a straight line in yaw/pitch
+  space. Powers are re-rolled on every target acquisition.
+- Fixation pause: 30% chance of a single-tick hold when the flick first enters
+  the final-approach zone (flick → pause → micro-adjust), rolled once per
+  acquisition. Residual is <1.5°, so clicks during the pause still connect.
+
+### Speed profile
+- Per-tick white speed jitter (±1%) replaced by an Ornstein-Uhlenbeck
+  correlated speed modulation (±5% at default jitter-intensity, ~200 ms
+  correlation): smooth, non-periodic speed variation, further smoothed by the
+  jerk limiter. Breaks constant-velocity tracking without visible jitter.
+- Single-tick 93% snap replaced by a decaying 0.68 ± 0.07 settle: the residual
+  closes over ~3 ticks like a human fixation (0.5° ≈ 2.6 cm at 3 blocks, still
+  inside the hitbox), instead of one robotic jump.
+- `smoothness` slider now scales step speed meaningfully (±20% instead of ±6%).
+
+### Untouched
+- GCD fix remains ALWAYS active (pre- and post-delta quantisation).
+- Settings names/structure unchanged; no new dependencies.
+
 ## Refactor (humanization + performance + robustness)
 
 ### Humanization

@@ -381,6 +381,12 @@ public class AdvancedAimAssist extends Module {
     private float   prevStepPitch = 0f;
     private int     skipTickCounter = 0;
 
+    // Visual naturalness: smooth mouse-speed variation + per-flick arc shape
+    private double  speedMod       = 0.0;  // OU process: correlated speed noise
+    private double  yawEasePower   = 3.0;  // per-flick ease powers (asymmetry = curved path)
+    private double  pitchEasePower = 2.4;
+    private boolean settlePauseRolled = false;
+
     // FIX 10: aim part resolved once and held across ticks (stable for Random)
     private AimPart currentAimPart = AimPart.Body;
     private int     aimPartTicks   = 0;
@@ -416,6 +422,10 @@ public class AdvancedAimAssist extends Module {
         prevStepYaw        = 0f;
         prevStepPitch      = 0f;
         skipTickCounter    = 0;
+        speedMod           = 0.0;
+        yawEasePower       = 3.0;
+        pitchEasePower     = 2.4;
+        settlePauseRolled  = false;
         aimPartTicks       = 0;
         inSwitchTransition = false;
         switchTransitionTicks = 0;
@@ -864,6 +874,19 @@ public class AdvancedAimAssist extends Module {
                 return;
             }
 
+            // Fixation pause: when the flick first enters the final-approach
+            // zone, humans often hold for one tick before micro-adjusting
+            // (flick → pause → adjust). Rolled once per acquisition; the
+            // residual here is <1.5°, so a click during the pause connects.
+            if (!settlePauseRolled && absYaw < 1.5 && absPitch < 1.5) {
+                settlePauseRolled = true;
+                if (rng.nextDouble() < 0.30) {
+                    lastPlayerYaw   = currentYaw;
+                    lastPlayerPitch = currentPitch;
+                    return;
+                }
+            }
+
             // ── EASE-OUT-CUBIC DAMPING & ASYMMETRIC DECOUPLING ──
             float maxYawTick   = (float) (horizontalSpeed.get() / 20.0);
             float maxPitchTick = (float) (verticalSpeed.get()   / 20.0);
@@ -873,16 +896,18 @@ public class AdvancedAimAssist extends Module {
             double manualMagnitude = Math.hypot(manualDeltaYaw, manualDeltaPitch);
             double synergyFactor   = manualMagnitude > 0.02f ? 1.0 : 0.42;
 
-            // Ease-out-cubic: decelerates as crosshair approaches target
+            // Ease-out with per-flick asymmetric powers: one axis leads and
+            // the other lags, so the approach traces a curved wrist arc
+            // instead of a straight line in yaw/pitch space.
             double tYaw  = Math.min(absYaw   / 25.0, 1.0);
             double tPitch = Math.min(absPitch / 20.0, 1.0);
-            double easeYaw   = 1.0 - Math.pow(1.0 - tYaw,   3.0);
-            double easePitch = 1.0 - Math.pow(1.0 - tPitch, 3.0);
+            double easeYaw   = 1.0 - Math.pow(1.0 - tYaw,   yawEasePower);
+            double easePitch = 1.0 - Math.pow(1.0 - tPitch, pitchEasePower);
             double expFactorYaw   = Math.max(easeYaw,   0.10);
             double expFactorPitch = Math.max(easePitch, 0.10);
 
-            double stepY = maxYawTick   * expFactorYaw   * (0.65 + 0.35 * glue) * (1.0 - smooth * 0.15) * synergyFactor * transitionFactor;
-            double stepP = maxPitchTick * expFactorPitch * (0.60 + 0.40 * glue) * (1.0 - (smooth * 1.20) * 0.15) * synergyFactor * transitionFactor;
+            double stepY = maxYawTick   * expFactorYaw   * (0.65 + 0.35 * glue) * (1.0 - smooth * 0.35) * synergyFactor * transitionFactor;
+            double stepP = maxPitchTick * expFactorPitch * (0.60 + 0.40 * glue) * (1.0 - (smooth * 1.20) * 0.35) * synergyFactor * transitionFactor;
 
             // Velocity floor for target tracking
             float targetAngularSpeedYaw = 0f, targetAngularSpeedPitch = 0f;
@@ -917,11 +942,16 @@ public class AdvancedAimAssist extends Module {
             // detection vector for Grim/Vulcan (snap-to-center). Instead, the
             // aim naturally decelerates via ease-out-cubic as it approaches.
 
-            // Visual naturalness: per-tick speed variation (humans don't move
-            // at constant speed). ±1% jitter on the step magnitude (scaled by jitter-intensity).
-            double speedJitter = 1.0 + (rng.nextDouble() - 0.5) * 0.02 * jitter;
-            finalStepYaw   = (float) (finalStepYaw   * speedJitter);
-            finalStepPitch = (float) (finalStepPitch * speedJitter);
+            // Visual naturalness: correlated mouse-speed modulation (OU).
+            // Humans change speed smoothly over ~200 ms; per-tick white noise
+            // reads as mechanical jitter. Non-periodic, low amplitude, and
+            // smoothed further by the jerk limiter below.
+            speedMod += -1.5 * speedMod * 0.05 + 0.07 * rng.nextGaussian() * Math.sqrt(0.05);
+            speedMod  = MathHelper.clamp(speedMod, -0.10, 0.10);
+            double jitterScale = MathHelper.clamp(jitter * 25.0, 0.3, 1.5);
+            double speedMul = 1.0 + speedMod * jitterScale;
+            finalStepYaw   = (float) (finalStepYaw   * speedMul);
+            finalStepPitch = (float) (finalStepPitch * speedMul);
 
             // Visual naturalness: fatigue simulation. After tracking for >2s,
             // slightly reduce accuracy (humans get tired / less precise).
@@ -947,12 +977,13 @@ public class AdvancedAimAssist extends Module {
             prevStepYaw    = finalStepYaw;
             prevStepPitch  = finalStepPitch;
 
-            // Final snap when already on-target: close most of the gap so the
-            // hit connects, but leave a tiny residual so it doesn't look locked. ⚠️
-            // Micro-snap: minimal residual. The ease-out-cubic already decelerates
-            // naturally; a large snapFactor creates detectable "hovering".
+            // Human settle: close the residual with a decaying fraction over
+            // ~3 ticks (fast fixation, then slower micro-adjustments) instead
+            // of one 93% jump, which reads as a robotic snap. 0.68 keeps the
+            // crosshair inside the hitbox (0.5° ≈ 2.6 cm at 3 blocks) so hits
+            // still connect while the approach visibly eases in.
             if (absYaw < 1.5 && absPitch < 1.5) {
-                double snapFactor = Math.min(1.0, 0.93 + (rng.nextDouble() - 0.5) * 0.10 * jitter);
+                double snapFactor = Math.min(1.0, 0.68 + (rng.nextDouble() - 0.5) * 0.14);
                 finalStepYaw   = (float) (absYaw   * snapFactor);
                 finalStepPitch = (float) (absPitch * snapFactor);
             }
@@ -1043,6 +1074,16 @@ public class AdvancedAimAssist extends Module {
         // FIX 9: drop jerk-limiter and overshoot state carried over from the old target.
         prevStepYaw        = 0f;
         prevStepPitch      = 0f;
+        // Roll a fresh arc shape: one axis leads the other, and which one
+        // leads varies per acquisition so approaches never repeat a curve.
+        if (ThreadLocalRandom.current().nextBoolean()) {
+            yawEasePower   = 3.2;
+            pitchEasePower = 2.1 + ThreadLocalRandom.current().nextDouble() * 0.7;
+        } else {
+            pitchEasePower = 3.2;
+            yawEasePower   = 2.1 + ThreadLocalRandom.current().nextDouble() * 0.7;
+        }
+        settlePauseRolled  = false;
         overshootTicksLeft = 0;
         overshootDuration  = 0;
         // FIX 10: re-roll the random aim part for the new target.
